@@ -1,0 +1,54 @@
+{
+    "name": "williameggers/reactphp-ssh-server",
+    "description": "SSH server implementation for ReactPHP",
+    "keywords": ["SSH", "server", "async", "ReactPHP"],
+    "type": "library",
+    "license": "BSD-2-Clause",
+    "scripts": {
+        "test": "vendor/bin/pest"
+    },
+    "authors": [
+        {
+            "name": "William Eggers",
+            "email": "william@eggers.id.au"
+        }
+    ],
+    "require": {
+        "php": ">=8.2",
+        "ext-mbstring": "*",
+        "ext-openssl": "*",
+        "ext-sodium": "*",
+        "evenement/evenement": "^3.0 || ^2.0 || ^1.0",
+        "phpseclib/phpseclib": "^3.0",
+        "psr/log": "^3.0",
+        "react/event-loop": "^1.2",
+        "react/promise": "^3.2",
+        "react/promise-stream": "^1.7.0",
+        "react/promise-timer": "^1.11.0",
+        "react/socket": "^1.16"
+    },
+    "require-dev": {
+        "ext-pcntl": "*",
+        "friendsofphp/php-cs-fixer": "^3.75",
+        "pestphp/pest": "^3.8.2",
+        "pestphp/pest-plugin-type-coverage": "^3.5",
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^9.6 || ^7.5 || ^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "WilliamEggers\\React\\SSH\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "WilliamEggers\\Tests\\React\\SSH\\": "tests/"
+        }
+    },
+    "config": {
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        },
+        "sort-packages": true
+    }
+}

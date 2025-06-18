@@ -1,0 +1,68 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/php
+{
+	"name": "PHP",
+	"build": {
+        "dockerfile": "Dockerfile",
+        "args": {
+            // Update VARIANT to pick a PHP version: 8, 8.1, 8.0, 7, 7.4
+            // Append -bullseye or -buster to pin to an OS version.
+            // Use -bullseye variants on local on arm64/Apple Silicon.
+            "PHP_VERSION": "8.2-bullseye"
+        }
+    },
+
+	// Features to add to the dev container. More info: https://containers.dev/features.
+	// "features": {},
+
+	// Configure tool-specific properties.
+	"customizations": {
+		"vscode": {
+			// Set *default* container specific settings.json values on container create.
+			"settings": {
+				"composer.executablePath": "/usr/local/bin/composer",
+				"composerCompanion.executablePath": "/usr/local/bin/composer",
+				"php.validate.enable": false,
+				"phpunit.php": "/usr/local/bin/php",
+				"phpunit.phpunit": "${localWorkspaceFolder}/vendor/bin/phpunit",
+				"phpunit.args": [
+					"-c", "phpunit.xml.dist", "--no-coverage"
+				],
+				"php-cs-fixer.executablePath": "${localWorkspaceFolder}/vendor/bin/php-cs-fixer",
+				"php-cs-fixer.onsave": false,
+				"[php]": {
+					"editor.defaultFormatter": "junstyle.php-cs-fixer"
+				},
+				"intelephense.environment.phpVersion": "8.2",
+				"workbench.startupEditor": "none"
+			},
+
+			// Add the IDs of extensions you want installed when the container is created.
+			"extensions": [
+				"ikappas.composer",
+				"felixfbecker.php-debug",
+				"faelv.composer-companion",
+				"bmewburn.vscode-intelephense-client",
+				"arjun.swagger-viewer",
+				"emallin.phpunit",
+				"junstyle.php-cs-fixer",
+				"dotjoshjohnson.xml",
+				"neilbrayfield.php-docblocker",
+				"mehedidracula.php-namespace-resolver",
+				"eamodio.gitlens",
+				"ms-azuretools.vscode-docker",
+				"sourcegraph.cody-ai",
+				"SanderRonde.phpstan-vscode"
+			],
+		}
+	},
+
+	// Use 'forwardPorts' to make a list of ports inside the container available locally.
+	"forwardPorts": []
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	// "postCreateCommand": "sudo chmod a+x \"$(pwd)\" && sudo rm -rf /var/www/html && sudo ln -s \"$(pwd)\" /var/www/html"
+
+	// Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+	// "remoteUser": "root"
+}

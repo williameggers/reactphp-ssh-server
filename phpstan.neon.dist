@@ -1,0 +1,13 @@
+parameters:
+    level: max
+
+    paths:
+        - examples/
+        - src/
+
+    treatPhpDocTypesAsCertain: false
+    ignoreErrors:
+        # ignore undefined methods due to magic `__call()` method
+        - identifier: missingType.iterableValue
+        - identifier: method.unused
+        - identifier: property.onlyWritten
