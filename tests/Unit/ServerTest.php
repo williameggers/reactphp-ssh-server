@@ -1,7 +1,4 @@
 <?php declare(strict_types=1);
-
-use phpseclib3\Net\SSH2;
-
 /**
  * Copyright (c) 2025, William Eggers, Ashley Hindle
  *
@@ -27,6 +24,8 @@ use phpseclib3\Net\SSH2;
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+use phpseclib3\Net\SSH2;
+
 beforeEach(function () {
     // Use a random available port for testing
     $this->port = rand(49152, 65535);
@@ -41,7 +40,7 @@ beforeEach(function () {
         <<<PHP
 <?php
 require '{$autoloadPath}';
-use React\Promise\Deferred;
+use React\\Promise\\Deferred;
 use WilliamEggers\\React\\SSH\\Channel;
 use WilliamEggers\\React\\SSH\\Connection;
 use WilliamEggers\\React\\SSH\\Loggers\\ConsoleLogger;
@@ -88,7 +87,20 @@ afterEach(function () {
 
     // Clean up process if it's still running
     if (isset($this->process) && is_resource($this->process)) {
-        proc_terminate($this->process, SIGKILL);
+        $status = proc_get_status($this->process);
+        if (true == $status['running']) { // process ran too long, kill it
+            // get the parent pid of the process we want to kill
+            $ppid = $status['pid'];
+            // use ps to get all the children of this process, and kill them
+            $pids = preg_split('/\s+/', shell_exec('ps -o pid --no-heading --ppid ' . $ppid) ?? '');
+            foreach ($pids as $pid) {
+                if (is_numeric($pid)) {
+                    posix_kill((int) $pid, 9); // 9 is the SIGKILL signal
+                }
+            }
+
+            proc_close($this->process);
+        }
     }
 });
 
@@ -118,8 +130,9 @@ test('accepts and handles new connections', function () {
 
     while (microtime(true) - $startTime < 0.2) { // 200ms timeout
         $line = fgets($this->pipes[1]); // Read from stdout
-        if ($line && strpos($line, '#1] Connection accepted from') !== false) {
+        if ($line && false !== strpos($line, '#1] Connection accepted from')) {
             $connectionAccepted = true;
+
             break;
         }
         usleep(10000); // 10ms sleep
@@ -138,7 +151,7 @@ test('manages multiple connections', function () {
 
     // Act
     $connections = [];
-    for ($i = 0; $i < 3; $i++) {
+    for ($i = 0; $i < 3; ++$i) {
         $clientSocket = @fsockopen($this->host, $this->port, $errno, $errstr, 1);
         expect($clientSocket)->toBeResource();
         $connections[] = $clientSocket;
@@ -156,12 +169,12 @@ test('manages multiple connections', function () {
         // Wait for data with 10ms timeout
         if (stream_select($read, $write, $except, 0, 10000) > 0) {
             $line = fgets($this->pipes[1]);
-            if ($line && strpos($line, 'Connection accepted from') !== false) {
+            if ($line && false !== strpos($line, 'Connection accepted from')) {
                 $childPids[] = $line;
             }
         }
 
-        $i++;
+        ++$i;
     }
 
     expect(count($childPids))->toBe(3);
@@ -171,7 +184,6 @@ test('manages multiple connections', function () {
         fclose($socket);
     }
 })->skip(inGithubActions(), 'Not working on GitHub CI atm, but works wonderfully locally and on test servers');
-
 
 test('successful connection using phpseclib ssh client', function () {
     // Arrange
@@ -184,7 +196,8 @@ test('successful connection using phpseclib ssh client', function () {
     expect($client->getBannerMessage())->toBe('PEST ServerTest');
     expect($client->isAuthenticated())->toBeTrue();
     expect($client->read())
-        ->toContain('Hello tcp://' . $this->host);
+        ->toContain('Hello tcp://' . $this->host)
+    ;
     expect($client->isConnected())->toBeTrue('phpseclib ssh2 client connected successfully');
 
     $client->disconnect();

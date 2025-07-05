@@ -1,5 +1,8 @@
 <?php
 
+use phpseclib3\Crypt\EC;
+use phpseclib3\Crypt\RSA;
+
 /*
 |--------------------------------------------------------------------------
 | Test Case
@@ -26,7 +29,7 @@
 
 function inGithubActions(): bool
 {
-    return !empty(getenv('GITHUB_ACTIONS'));
+    return ! empty(getenv('GITHUB_ACTIONS'));
 }
 
 function pidRunning(int $pid): bool
@@ -70,7 +73,7 @@ expect()->extend('toNotBeRunning', function (int $maxMs = 1000) {
 
     while (microtime(true) - $startTime < $maxMs / 1000) {
         $running = pidRunning($pid);
-        if ($running === false) {
+        if (false === $running) {
             break;
         }
 
@@ -94,9 +97,10 @@ expect()->extend('toNotBeRunning', function (int $maxMs = 1000) {
 */
 
 /**
- * Wait for the server to start listening
+ * Wait for the server to start listening.
  *
- * @param  resource  $stdout
+ * @param resource $stdout
+ *
  * @return bool
  */
 function wait_for_server_to_start($stdout, string $host, int $port, int $maxMs = 300)
@@ -105,18 +109,16 @@ function wait_for_server_to_start($stdout, string $host, int $port, int $maxMs =
     $startTime = microtime(true);
     while (microtime(true) - $startTime < $maxMs / 1000) {
         $line = fgets($stdout);
-        if (strpos($line, "Listening on {$host}:{$port}") !== false) {
+        if (false !== strpos($line, "Listening on {$host}:{$port}")) {
             return true;
         }
     }
 
-    throw new RuntimeException('Server did not start within '.$maxMs.'ms');
+    throw new RuntimeException('Server did not start within ' . $maxMs . 'ms');
 }
 
 /**
- * Start the server and wait for it to start listening
- *
- * @param  string  $script
+ * Start the server and wait for it to start listening.
  */
 function start_server_and_wait_for_listening(string $scriptPath, string $host, int $port, int $maxMs = 300): array
 {
@@ -126,7 +128,7 @@ function start_server_and_wait_for_listening(string $scriptPath, string $host, i
         2 => ['pipe', 'w'],   // stderr
     ];
 
-    $command = sprintf('"%s" %s %d %s', escapeshellcmd(PHP_BINARY), escapeshellarg($scriptPath), $port, escapeshellarg($host));
+    $command = sprintf('"%s" %s', escapeshellcmd(PHP_BINARY), escapeshellarg($scriptPath), $port, escapeshellarg($host));
     $process = proc_open($command, $descriptorSpec, $pipes);
     if (! is_resource($process)) {
         throw new RuntimeException('Failed to start server process');
@@ -135,4 +137,34 @@ function start_server_and_wait_for_listening(string $scriptPath, string $host, i
     wait_for_server_to_start($pipes[1], $host, $port, $maxMs);
 
     return ['process' => $process, 'pid' => proc_get_status($process)['pid'], 'pipes' => $pipes];
+}
+
+/**
+ * Generate a public/private OpenSSH-compatible key pair.
+ *
+ * @param string $type Supported values: 'rsa', 'ed25519'
+ *
+ * @return array{private: string, public: string}
+ */
+function generateTestKeyPair(string $type = 'ed25519'): array
+{
+    switch (strtolower($type)) {
+        case 'rsa':
+            $key = RSA::createKey(2048);
+
+            break;
+
+        case 'ed25519':
+            $key = EC::createKey('Ed25519');
+
+            break;
+
+        default:
+            throw new InvalidArgumentException("Unsupported key type: {$type}");
+    }
+
+    return [
+        'private' => $key->toString('PKCS8'),                      // PEM-encoded private key
+        'public' => $key->getPublicKey()->toString('OpenSSH'),   // OpenSSH-compatible public key
+    ];
 }
