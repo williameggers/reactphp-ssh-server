@@ -68,8 +68,8 @@ $server->on('connection', function (Connection $connection) use ($authorizedPubl
          *    The server MUST check that the key is a valid authenticator for the user,
          *    and MUST check that the signature is valid."
          *
-         * Therefore, this phase is solely concerned with authorization—verifying that the
-         * already validated public key matches one of the authorized keys for the given user.
+         * Therefore, this phase is solely concerned with verifying that the already validated
+         * public key matches one of the authorized keys for the given user.
          */
         $isAuthenticated = false;
 
