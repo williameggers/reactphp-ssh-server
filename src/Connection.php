@@ -35,6 +35,7 @@ use React\Promise\Deferred;
 use React\Promise\Promise;
 use React\Promise\PromiseInterface;
 
+use function React\Promise\Timer\sleep;
 use function React\Promise\Timer\timeout;
 
 use React\Socket\ConnectionInterface;
@@ -86,7 +87,15 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private ?string $banner = null;
 
     private bool $bannerSent = false;
+    private bool $serverIdentiferSent = false;
+    private bool $kexInitSent = false;
     private bool $authenticationEnabled = false;
+
+    /**
+     * Indicates whether the connected SSH client supports the EXT_INFO (RFC 8308) message.
+     * Default is true; this may be set to false based on client version string (e.g., PuTTY).
+     */
+    private bool $supportsExtInfo = true;
 
     private int $connectionId;
     private int $maxPacketSize = 1024 * 1024; // This gets updated when the client opens a channel
@@ -259,6 +268,19 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
     public function handle(): self
     {
+        /**
+         * Wait up to 0.5 seconds for the client to send its SSH version string.
+         * If the client hasn't identified itself by then, assume it's waiting for the server's version first.
+         * Send the server identifier to trigger the client's next step in the handshake.
+         */
+        sleep(0.5)->then(function () {
+            if (is_null($this->clientVersion)) {
+                $this->logger->debug('Timeout waiting for client to identify itself. Sending identifier.');
+                $this->serverIdentiferSent = true;
+                $this->connection->write($this->serverVersion . "\r\n");
+            }
+        });
+
         $this->connection->on('data', function (mixed $data) {
             $this->handleSshClientData($data);
         });
@@ -518,7 +540,9 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         // Accept the user auth service
         if ('ssh-userauth' === $serviceName) {
             // Before accepting, send EXT_INFO if supported (RFC 8308)
-            $this->sendExtInfo();
+            if ($this->supportsExtInfo) {
+                $this->sendExtInfo();
+            }
 
             $this->writePacked(MessageType::SERVICE_ACCEPT, 'ssh-userauth');
         }
@@ -1077,10 +1101,43 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     private function handleData(string $data): void
     {
-        if (! $this->clientVersion) {
+        if (is_null($this->clientVersion)) {
             $this->clientVersion = trim($data);
-            $this->connection->write($this->serverVersion . "\r\n");
-            $this->info("Client version set: {$this->clientVersion}, responded with {$this->serverVersion}");
+            // If we haven't already transmitted the server identifier, transmit it now.
+            if (! $this->serverIdentiferSent) {
+                $this->connection->write($this->serverVersion . "\r\n");
+            }
+            $this->info("Client version set: {$this->clientVersion}, we sent {$this->serverVersion}");
+
+            if (false !== stripos($this->clientVersion ?? '', 'PuTTY')) {
+                // PuTTY does not support EXT_INFO
+                $this->supportsExtInfo = false;
+            } elseif (false !== stripos($this->clientVersion ?? '', 'OpenSSH')) {
+                // OpenSSH >= 7.8 supports EXT_INFO
+                preg_match('/OpenSSH_([0-9.]+)/', $this->clientVersion ?? '', $matches);
+                if (! empty($matches[1]) && version_compare($matches[1], '7.8', '>=')) {
+                    $this->supportsExtInfo = true;
+                } else {
+                    $this->supportsExtInfo = false;
+                }
+            } else {
+                // Default: assume true unless known otherwise
+                $this->supportsExtInfo = true;
+            }
+
+            /**
+             * After a short delay, check if the initial key exchange has completed.
+             * If not, assume the client didn't send a KEXINIT and proactively send the server's KEXINIT
+             * to initiate the key exchange process. This handles clients that wait for the server to start it.
+             */
+            sleep(0.5)->then(function () {
+                if (! $this->packetHandler->hasCompletedInitialKeyExchange()) {
+                    $this->kexNegotiator = new KexNegotiator($this->clientVersion ?? '', $this->serverVersion);
+                    $this->kexInitSent = true;
+                    $response = $this->kexNegotiator->response();
+                    $this->writeConnection($response);
+                }
+            });
 
             return;
         }
@@ -1358,14 +1415,24 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         if ($this->packetHandler->hasCompletedInitialKeyExchange()) {
             $this->debug('Received rekey request from client');
             $this->packetHandler->toggleRekeyInProgress();
+            // SSH_MSG_KEXINIT is sent once at the beginning of the key exchange,
+            // and re-sent if a rekey is initiated.
+            $this->kexInitSent = false;
         }
 
-        $this->kexNegotiator = new KexNegotiator($packet, $this->clientVersion ?? '', $this->serverVersion);
-        $response = $this->kexNegotiator->response();
-        $this->writeConnection($response);
+        if (! $this->kexInitSent) {
+            $this->kexNegotiator = new KexNegotiator($this->clientVersion ?? '', $this->serverVersion, $packet);
+            $this->kexInitSent = true;
+            $response = $this->kexNegotiator->response();
+            $this->writeConnection($response);
+        } else {
+            // We've already sent a KEX INIT and we're not in a rekey, so just record
+            // the client packet for algorithm negotiation.
+            $this->kexNegotiator?->setClientKexInit($packet);
+        }
 
         try {
-            $negotiatedAlgorithms = $this->kexNegotiator->negotiateAlgorithms();
+            $negotiatedAlgorithms = $this->kexNegotiator?->negotiateAlgorithms();
             $this->debug('Negotiated algorithms: ' . json_encode($negotiatedAlgorithms));
         } catch (\Throwable $e) {
             $this->disconnect($e->getMessage(), DisconnectReason::KEY_EXCHANGE_FAILED);

@@ -83,10 +83,14 @@ final class KexNegotiator
     ];
 
     public function __construct(
-        public Packet $packet,
         public readonly string $clientVersion,
         public readonly string $serverVersion,
-    ) {}
+        public ?Packet $packet = null
+    ) {
+        if (! is_null($packet)) {
+            $this->setClientKexInit($packet);
+        }
+    }
 
     /**
      * Returns the list of public key algorithms accepted for user authentication.
@@ -101,10 +105,16 @@ final class KexNegotiator
         return $this->acceptedUserKeyAlgorithms;
     }
 
+    public function setClientKexInit(Packet $packet): void
+    {
+        $this->packet = $packet;
+        if (! is_null($this->packet)) {
+            $this->clientKexInit = chr($this->packet->type->value) . $this->packet->message;
+        }
+    }
+
     public function response(): string
     {
-        $this->clientKexInit = chr($this->packet->type->value) . $this->packet->message;
-
         // Build our algorithms lists
         $kexAlgorithms = implode(',', $this->kexAlgorithms);
         $serverHostKeyAlgorithms = implode(',', $this->serverHostKeyAlgorithms);
