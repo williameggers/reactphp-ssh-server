@@ -268,7 +268,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
     public function handle(): self
     {
-        /**
+        /*
          * Wait up to 0.5 seconds for the client to send its SSH version string.
          * If the client hasn't identified itself by then, assume it's waiting for the server's version first.
          * Send the server identifier to trigger the client's next step in the handshake.
@@ -1125,13 +1125,16 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                 $this->supportsExtInfo = true;
             }
 
-            /**
+            /*
              * After a short delay, check if the initial key exchange has completed.
              * If not, assume the client didn't send a KEXINIT and proactively send the server's KEXINIT
              * to initiate the key exchange process. This handles clients that wait for the server to start it.
              */
             sleep(0.5)->then(function () {
-                if (! $this->packetHandler->hasCompletedInitialKeyExchange()) {
+                if (
+                    ! $this->packetHandler->hasCompletedInitialKeyExchange()
+                    && false === $this->kexInitSent
+                ) {
                     $this->kexNegotiator = new KexNegotiator($this->clientVersion ?? '', $this->serverVersion);
                     $this->kexInitSent = true;
                     $response = $this->kexNegotiator->response();
