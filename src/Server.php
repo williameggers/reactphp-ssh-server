@@ -45,7 +45,7 @@ final class Server extends EventEmitter implements ServerInterface
      *
      * This value is used in the server identification string during the SSH handshake.
      */
-    public const VERSION = '1.0.0';
+    public const VERSION = '1.0.3';
 
     /**
      * Server host keys for SSH identity.
@@ -57,37 +57,38 @@ final class Server extends EventEmitter implements ServerInterface
     private LoopInterface $loop;
 
     private int $connectionId = 0;
-    private ?int $idleTimeoutSeconds;
 
     private ?string $banner = null;
     private bool $authenticationEnabled = false;
 
     /**
-     * Initializes a new SSH server instance.
+     * Constructs a new SSH server instance.
      *
      * Sets up the event loop, TCP listener, and default server host keys (Ed25519 and RSA).
-     * Accepts an optional idle timeout, event loop, and socket context options.
-     * When a new client connects, a `Connection` instance is created and configured,
-     * including authentication, logging, idle timeout, and banner settings.
+     * Optionally accepts an idle timeout, event loop, socket context options, and a base directory for host keys.
      *
-     * @param int|string         $uri                the address or port to bind the TCP server to
+     * When a client connects, a `Connection` instance is created and configured with the current
+     * banner, connection ID, idle timeout, logger, server host keys, and authentication settings.
+     * The new connection is then emitted via the `connection` event.
+     *
+     * @param int|string         $uri                address or port to bind the TCP server to
      * @param null|int           $idleTimeoutSeconds optional idle timeout in seconds before disconnecting inactive clients
-     * @param null|LoopInterface $loop               Optional ReactPHP event loop to use. If not provided, the default loop is used.
+     * @param null|LoopInterface $loop               optional ReactPHP event loop to use. Defaults to the global loop if not provided.
      * @param array              $context            optional stream context options for the TCP server
+     * @param null|string        $hostKeyPath        optional base directory for loading server host keys
      */
-    public function __construct(int|string $uri, ?int $idleTimeoutSeconds = 60, ?LoopInterface $loop = null, array $context = [])
+    public function __construct(int|string $uri, private ?int $idleTimeoutSeconds = 60, ?LoopInterface $loop = null, array $context = [], ?string $hostKeyPath = null)
     {
         $this->loop = $loop ?: Loop::get();
         $this->logger = new NullLogger();
-        $this->idleTimeoutSeconds = $idleTimeoutSeconds;
 
         // Initialize and register server host keys for supported SSH host key algorithms.
         // These keys will be advertised during the key exchange phase to authenticate the server.
-        $this->addServerHostKey(new ServerHostKey('ed25519'));
-        $this->addServerHostKey(new ServerHostKey('rsa'));
+        $this->addServerHostKey(new ServerHostKey('ed25519', baseDir: $hostKeyPath));
+        $this->addServerHostKey(new ServerHostKey('rsa', baseDir: $hostKeyPath));
 
         $this->tcpServer = new TcpServer($uri, $loop, $context);
-        $this->tcpServer->on('connection', function (ConnectionInterface $connection) {
+        $this->tcpServer->on('connection', function (ConnectionInterface $connection): void {
             $connection = (new Connection($connection, $this->loop))
                 ->setBanner($this->banner)
                 ->setConnectionId(++$this->connectionId)

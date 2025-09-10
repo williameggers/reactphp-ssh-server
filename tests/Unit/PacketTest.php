@@ -27,7 +27,7 @@
 use WilliamEggers\React\SSH\Enums\MessageType;
 use WilliamEggers\React\SSH\Packet;
 
-test('extracts string and integers correctly', function () {
+test('extracts string and integers correctly', function (): void {
     // Create a packet with: string("hello") + uint32(123) + uint32(456)
     $message = pack('N', 5) . 'howdy' . pack('N', 123) . pack('N', 456);
     $packet = new Packet(chr(MessageType::CHANNEL_OPEN->value) . $message);
@@ -40,7 +40,7 @@ test('extracts string and integers correctly', function () {
     ;
 });
 
-test('extracts boolean values correctly', function () {
+test('extracts boolean values correctly', function (): void {
     // Create a packet with: string("test") + bool(true) + bool(false)
     $message = pack('N', 5) . 'howdy' . chr(1) . chr(0);
     $packet = new Packet(chr(MessageType::CHANNEL_OPEN->value) . $message);
@@ -53,7 +53,7 @@ test('extracts boolean values correctly', function () {
     ;
 });
 
-test('handles empty string correctly', function () {
+test('handles empty string correctly', function (): void {
     // Create a packet with: string("") + uint32(123)
     $message = pack('N', 0) . pack('N', 123);
     $packet = new Packet(chr(MessageType::CHANNEL_OPEN->value) . $message);
@@ -65,7 +65,7 @@ test('handles empty string correctly', function () {
     ;
 });
 
-test('throws exception for unknown format specifier', function () {
+test('throws exception for unknown format specifier', function (): void {
     $message = pack('N', 5) . 'howdy';
     $packet = new Packet(chr(MessageType::CHANNEL_OPEN->value) . $message);
 
@@ -74,7 +74,7 @@ test('throws exception for unknown format specifier', function () {
     ;
 });
 
-test('handles multiple strings correctly', function () {
+test('handles multiple strings correctly', function (): void {
     // Create a packet with: string("hello") + string("world") + uint32(123)
     $message = pack('N', 5) . 'howdy' . pack('N', 5) . 'world' . pack('N', 123);
     $packet = new Packet(chr(MessageType::CHANNEL_OPEN->value) . $message);
@@ -87,7 +87,7 @@ test('handles multiple strings correctly', function () {
     ;
 });
 
-test('handles long strings correctly', function () {
+test('handles long strings correctly', function (): void {
     $longString = str_repeat('a', 1000);
     // Create a packet with: string(1000 chars) + uint32(123)
     $message = pack('N', 1000) . $longString . pack('N', 123);
@@ -100,7 +100,7 @@ test('handles long strings correctly', function () {
     ;
 });
 
-test('handles all formats together at once', function () {
+test('handles all formats together at once', function (): void {
     $message = pack('N', 5) . 'howdy' . pack('N', 420) . chr(1);
     $packet = new Packet(chr(MessageType::CHANNEL_OPEN->value) . $message);
 
@@ -112,7 +112,7 @@ test('handles all formats together at once', function () {
 });
 
 // SSH_MSG_USERAUTH_REQUEST simulation
-it('extracts username, service, and method from SSH_MSG_USERAUTH_REQUEST', function () {
+it('extracts username, service, and method from SSH_MSG_USERAUTH_REQUEST', function (): void {
     $username = 'testuser';
     $service = 'ssh-connection';
     $method = 'password';

@@ -35,22 +35,22 @@ use WilliamEggers\React\SSH\Server;
 $server = new Server('127.0.0.1:22');
 $server->setLogger(new ConsoleLogger());
 
-$server->on('connection', function (Connection $connection) {
-    $connection->on('channel.open', function (Channel $channel) {
+$server->on('connection', static function (Connection $connection): void {
+    $connection->on('channel.open', static function (Channel $channel): void {
         $channel->debug('Channel open: ' . $channel->getChannelType());
-        $channel->on('shell-request', function (Deferred $started) use ($channel) {
+        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
             $channel->write('Hello ' . $channel->getConnection()->getRemoteAddress() . "!\r\n");
             $channel->write("Welcome to this amazing SSH server!\r\n");
             $channel->write("Here's a tip: don't say anything.\r\n");
 
-            $channel->on('data', function ($data) use ($channel) {
+            $channel->on('data', static function ($data) use ($channel): void {
                 $channel->getConnection()->close();
             });
 
             $started->resolve(true);
         });
 
-        $channel->on('exec-request', function (string $command, Deferred $started) use ($channel) {
+        $channel->on('exec-request', static function (string $command, Deferred $started) use ($channel): void {
             $channel->debug('Channel command: ' . $command);
             $channel->end("Requested command: {$command}\r\n");
 

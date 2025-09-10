@@ -70,7 +70,7 @@ final class PacketHandler
     private string $macMethod_CtoS;
 
     // MAC key for Client->Server messages
-    private ?string $macKey_CtoS;
+    private ?string $macKey_CtoS = null;
 
     // Negotiated encryption method Server->Client
     private string $encryptionMethod_StoC;
@@ -85,7 +85,7 @@ final class PacketHandler
     private string $macMethod_StoC;
 
     // MAC key for Server->Client messages
-    private ?string $macKey_StoC;
+    private ?string $macKey_StoC = null;
 
     // Key exchange instance
     private Kex $kex;
@@ -232,7 +232,7 @@ final class PacketHandler
         $K = $this->packMpint($kex->getSharedSecret());
         $H = $kex->getExchangeHash();
 
-        $kdf_mac = function (string $letter, int $needed_length) use ($K, $H, $kex): string {
+        $kdf_mac = static function (string $letter, int $needed_length) use ($K, $H, $kex): string {
             $output = '';
             $input = $K . $H . $letter . $kex->getSessionId();
             $output = hash('sha256', $input, true);
@@ -245,12 +245,12 @@ final class PacketHandler
         };
 
         // Modified KDF to support extended hashing if needed
-        $kdf = function (string $letter, int $needed_length) use ($K, $H, $kex): string {
+        $kdf = static function (string $letter, int $needed_length) use ($K, $H, $kex): string {
             $output = '';
             $prev_block = '';
 
             while (strlen($output) < $needed_length) {
-                $input = $K . $H . ($prev_block ? $prev_block : $letter) . $kex->getSessionId();
+                $input = $K . $H . ($prev_block ?: $letter) . $kex->getSessionId();
                 $hash = hash('sha256', $input, true);
                 $output .= $hash;
                 $prev_block = $hash;
@@ -1031,38 +1031,16 @@ final class PacketHandler
      */
     private function macAlgorithmToHashInstance(string $algorithm): array
     {
-        switch ($algorithm) {
-            case 'umac-64@openssh.com':
-            case 'umac-64-etm@openssh.com':
-                return [new Hash('umac-64'), 16];
-
-            case 'umac-128@openssh.com':
-            case 'umac-128-etm@openssh.com':
-                return [new Hash('umac-128'), 16];
-
-            case 'hmac-sha2-512':
-            case 'hmac-sha2-512-etm@openssh.com':
-                return [new Hash('sha512'), 64];
-
-            case 'hmac-sha2-256':
-            case 'hmac-sha2-256-etm@openssh.com':
-                return [new Hash('sha256'), 32];
-
-            case 'hmac-sha1':
-            case 'hmac-sha1-etm@openssh.com':
-                return [new Hash('sha1'), 20];
-
-            case 'hmac-sha1-96':
-                return [new Hash('sha1-96'), 20];
-
-            case 'hmac-md5':
-                return [new Hash('md5'), 16];
-
-            case 'hmac-md5-96':
-                return [new Hash('md5-96'), 16];
-
-            default:
-                throw new \RuntimeException('Unhandled hash algorithm');
-        }
+        return match ($algorithm) {
+            'umac-64@openssh.com', 'umac-64-etm@openssh.com' => [new Hash('umac-64'), 16],
+            'umac-128@openssh.com', 'umac-128-etm@openssh.com' => [new Hash('umac-128'), 16],
+            'hmac-sha2-512', 'hmac-sha2-512-etm@openssh.com' => [new Hash('sha512'), 64],
+            'hmac-sha2-256', 'hmac-sha2-256-etm@openssh.com' => [new Hash('sha256'), 32],
+            'hmac-sha1', 'hmac-sha1-etm@openssh.com' => [new Hash('sha1'), 20],
+            'hmac-sha1-96' => [new Hash('sha1-96'), 20],
+            'hmac-md5' => [new Hash('md5'), 16],
+            'hmac-md5-96' => [new Hash('md5-96'), 16],
+            default => throw new \RuntimeException('Unhandled hash algorithm'),
+        };
     }
 }

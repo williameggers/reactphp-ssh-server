@@ -26,7 +26,7 @@
 
 use WilliamEggers\React\SSH\Values\TerminalInfo;
 
-it('constructs a TerminalInfo instance with expected values', function () {
+it('constructs a TerminalInfo instance with expected values', function (): void {
     $info = new TerminalInfo(
         term: 'xterm-256color',
         widthChars: 80,
@@ -44,7 +44,7 @@ it('constructs a TerminalInfo instance with expected values', function () {
     expect($info->modes)->toMatchArray(['ECHO' => 1, 'ICANON' => 1]);
 });
 
-it('accepts zero or minimal values for pixel and character dimensions', function () {
+it('accepts zero or minimal values for pixel and character dimensions', function (): void {
     $info = new TerminalInfo(
         term: 'vt100',
         widthChars: 0,
@@ -62,7 +62,7 @@ it('accepts zero or minimal values for pixel and character dimensions', function
     expect($info->modes)->toBe([]);
 });
 
-it('supports extended terminal modes', function () {
+it('supports extended terminal modes', function (): void {
     $modes = [
         'ECHO' => 1,
         'ICANON' => 0,

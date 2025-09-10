@@ -35,11 +35,11 @@ $server = (new Server('127.0.0.1:22'))
     ->enableAuthentication()
 ;
 
-$server->on('connection', function (Connection $connection) {
+$server->on('connection', static function (Connection $connection): void {
     /**
      * @param Deferred<bool> $authenticated Deferred that must be resolved with a boolean indicating authentication success.
      */
-    $connection->on('authenticate', function (string $username, string $method, array $credentials, Deferred $authenticated) {
+    $connection->on('authenticate', static function (string $username, string $method, array $credentials, Deferred $authenticated): void {
         $isAuthenticated = false;
         $password = $credentials[0] ?? null;
 
@@ -54,8 +54,8 @@ $server->on('connection', function (Connection $connection) {
         $authenticated->resolve($isAuthenticated);
     });
 
-    $connection->on('channel.open', function (Channel $channel) {
-        $channel->on('shell-request', function (Deferred $started) use ($channel) {
+    $connection->on('channel.open', static function (Channel $channel): void {
+        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
             $channel->end('Authenticated as ' . $channel->getConnection()->getUsername() . "!\r\n");
 
             $started->resolve(true);

@@ -26,7 +26,7 @@
 
 use WilliamEggers\React\SSH\Values\WinSize;
 
-it('constructs a WinSize instance with all parameters provided', function () {
+it('constructs a WinSize instance with all parameters provided', function (): void {
     $size = new WinSize(
         rows: 24,
         cols: 80,
@@ -40,7 +40,7 @@ it('constructs a WinSize instance with all parameters provided', function () {
     expect($size->heightPixels)->toBe(600);
 });
 
-it('constructs a WinSize instance with only required parameters', function () {
+it('constructs a WinSize instance with only required parameters', function (): void {
     $size = new WinSize(
         rows: 30,
         cols: 100
@@ -52,14 +52,14 @@ it('constructs a WinSize instance with only required parameters', function () {
     expect($size->heightPixels)->toBe(0);
 });
 
-it('accepts zero dimensions for rows and columns', function () {
+it('accepts zero dimensions for rows and columns', function (): void {
     $size = new WinSize(0, 0);
 
     expect($size->rows)->toBe(0);
     expect($size->cols)->toBe(0);
 });
 
-it('handles very large terminal sizes', function () {
+it('handles very large terminal sizes', function (): void {
     $size = new WinSize(
         rows: 1000,
         cols: 3000,

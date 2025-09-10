@@ -63,13 +63,11 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      * @var array<string, ServerHostKey>
      */
     private array $serverHostKeys;
-    private ConnectionInterface $connection;
     private ?KexNegotiator $kexNegotiator = null;
     private PacketHandler $packetHandler;
     private PublicKeyValidator $publicKeyValidator;
     private ?KeyboardInteractiveConfig $keyboardInteractiveConfig = null;
     private TimerInterface $idleCheck;
-    private LoopInterface $loop;
 
     /**
      * @var Channel[]
@@ -102,14 +100,12 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private int $authenticationFailureCount = 0;
     private float $deferredEventPromiseTimeout = 10.0; // The deferred event promises must resolve within the configured timeout period
 
-    public function __construct(ConnectionInterface $connection, LoopInterface $loop)
+    public function __construct(private ConnectionInterface $connection, private LoopInterface $loop)
     {
-        $this->loop = $loop;
         $this->connectedAt = new \DateTimeImmutable();
         $this->lastActivity = new \DateTimeImmutable();
-        $this->connection = $connection;
         $this->publicKeyValidator = new PublicKeyValidator(new Loggers\NullLogger());
-        $this->packetHandler(new PacketHandler($connection));
+        $this->packetHandler(new PacketHandler($this->connection));
         $this->setLogger(new Loggers\NullLogger());
 
         Util::forwardEvents($this->connection, $this, ['close', 'error']);
@@ -135,7 +131,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
     public function log(mixed $level, string|\Stringable $message, array $context = []): void
     {
-        $messagePrepend = strtoupper(sprintf('[%s #%d]', str_replace('WilliamEggers\React\SSH\\', '', $this::class), $this->connectionId));
+        $messagePrepend = strtoupper(sprintf('[%s #%d]', str_replace('WilliamEggers\React\SSH\\', '', self::class), $this->connectionId));
         $this->logger->log($level, $messagePrepend . ' ' . $message, $context);
     }
 
@@ -273,7 +269,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
          * If the client hasn't identified itself by then, assume it's waiting for the server's version first.
          * Send the server identifier to trigger the client's next step in the handshake.
          */
-        sleep(0.5)->then(function () {
+        sleep(0.5)->then(function (): void {
             if (is_null($this->clientVersion)) {
                 $this->logger->debug('Timeout waiting for client to identify itself. Sending identifier.');
                 $this->serverIdentiferSent = true;
@@ -281,15 +277,15 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             }
         });
 
-        $this->connection->on('data', function (mixed $data) {
+        $this->connection->on('data', function (mixed $data): void {
             $this->handleSshClientData($data);
         });
 
-        $this->connection->on('close', function () {
+        $this->connection->on('close', function (): void {
             $this->cleanup();
         });
 
-        $this->idleCheck = $this->loop->addPeriodicTimer(5.0, function () {
+        $this->idleCheck = $this->loop->addPeriodicTimer(5.0, function (): void {
             $inactiveSeconds = $this->dateIntervalToSeconds(
                 $this->lastActivity->diff(new \DateTimeImmutable())
             );
@@ -648,7 +644,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             /** @var PromiseInterface<bool> $authenticatePromise */
             $authenticatePromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
             $authenticatePromise->then(
-                function (bool $authSuccess) {
+                function (bool $authSuccess): void {
                     if (! $authSuccess) {
                         ++$this->authenticationFailureCount;
 
@@ -664,7 +660,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                     $this->writePacked(MessageType::USERAUTH_SUCCESS);
                 }
             )->catch(
-                function () {
+                function (): void {
                     $this->writePacked(MessageType::USERAUTH_FAILURE);
                     $this->disconnect('Timeout validating credentials');
                 }
@@ -712,7 +708,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                     /** @var PromiseInterface<bool> $authenticatePromise */
                     $authenticatePromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
                     $authenticatePromise->then(
-                        function (bool $authSuccess) use ($authenticatedPublicKey) {
+                        function (bool $authSuccess) use ($authenticatedPublicKey): void {
                             if (! $authSuccess) {
                                 $availableAuthMethods = [
                                     'publickey',
@@ -732,7 +728,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                             $this->authenticatedPublicKey = $authenticatedPublicKey;
                         }
                     )->catch(
-                        function () {
+                        function (): void {
                             $this->writePacked(MessageType::USERAUTH_FAILURE);
                             $this->disconnect('Timeout validating credentials');
                         }
@@ -799,7 +795,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
         /** @var PromiseInterface<bool> $authenticatePromise */
         $authenticatePromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
-        $authenticatePromise->then(function (bool $authSuccess) {
+        $authenticatePromise->then(function (bool $authSuccess): void {
             if (! $authSuccess) {
                 ++$this->authenticationFailureCount;
 
@@ -813,7 +809,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             }
 
             $this->writePacked(MessageType::USERAUTH_SUCCESS);
-        })->catch(function (\Throwable $e) {
+        })->catch(function (\Throwable $e): void {
             $this->writePacked(MessageType::USERAUTH_FAILURE);
             $this->disconnect('Timeout validating credentials');
         });
@@ -897,7 +893,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             case 'pty-req':
                 /** @var Promise<bool> $handlePtyRequestPromise */
                 $handlePtyRequestPromise = $this->handlePtyRequest($channel, $packet);
-                $handlePtyRequestPromise->then(function (bool $success) use ($wantReply, $channelSuccessReply, $channelFailureReply) {
+                $handlePtyRequestPromise->then(function (bool $success) use ($wantReply, $channelSuccessReply, $channelFailureReply): void {
                     if ($wantReply) {
                         $this->writeConnection($success ? $channelSuccessReply : $channelFailureReply);
                     }
@@ -920,11 +916,11 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
                     /** @var PromiseInterface<bool> $execRequestPromise */
                     $execRequestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
-                    $execRequestPromise->then(function (bool $started) use ($wantReply, $channelSuccessReply, $channelFailureReply) {
+                    $execRequestPromise->then(function (bool $started) use ($wantReply, $channelSuccessReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->writeConnection($started ? $channelSuccessReply : $channelFailureReply);
                         }
-                    })->catch(function (\Throwable $e) use ($wantReply, $channelFailureReply) {
+                    })->catch(function (\Throwable $e) use ($wantReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->error($e->getMessage());
                             $this->writeConnection($channelFailureReply);
@@ -948,11 +944,11 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
                     /** @var PromiseInterface<bool> $shellRequestPromise */
                     $shellRequestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
-                    $shellRequestPromise->then(function (bool $started) use ($wantReply, $channelSuccessReply, $channelFailureReply) {
+                    $shellRequestPromise->then(function (bool $started) use ($wantReply, $channelSuccessReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->writeConnection($started ? $channelSuccessReply : $channelFailureReply);
                         }
-                    })->catch(function (\Throwable $e) use ($wantReply, $channelFailureReply) {
+                    })->catch(function (\Throwable $e) use ($wantReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->error($e->getMessage());
                             $this->writeConnection($channelFailureReply);
@@ -1130,7 +1126,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
              * If not, assume the client didn't send a KEXINIT and proactively send the server's KEXINIT
              * to initiate the key exchange process. This handles clients that wait for the server to start it.
              */
-            sleep(0.5)->then(function () {
+            sleep(0.5)->then(function (): void {
                 if (
                     ! $this->packetHandler->hasCompletedInitialKeyExchange()
                     && false === $this->kexInitSent
@@ -1618,7 +1614,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             }
         }
 
-        return new Promise(function (callable $resolve, callable $reject) use ($channel, $term, $widthChars, $heightRows, $widthPixels, $heightPixels, $modes) {
+        return new Promise(function (callable $resolve, callable $reject) use ($channel, $term, $widthChars, $heightRows, $widthPixels, $heightPixels, $modes): void {
             try {
                 // Store terminal info in the channel
                 $channel->setTerminalInfo(
@@ -1642,9 +1638,9 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
                 /** @var PromiseInterface<bool> $ptyRequestPromise */
                 $ptyRequestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
-                $ptyRequestPromise->then(function (bool $started) use ($resolve) {
+                $ptyRequestPromise->then(static function (bool $started) use ($resolve): void {
                     $resolve($started);
-                })->catch(function (\Throwable $e) use ($reject) {
+                })->catch(static function (\Throwable $e) use ($reject): void {
                     $reject($e);
                 });
             } catch (\Exception $e) {
@@ -1666,7 +1662,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private function cleanup(): void
     {
         // Close all active channels
-        array_map(fn (Channel $channel) => $channel->close(), $this->activeChannels);
+        array_map(static fn (Channel $channel) => $channel->close(), $this->activeChannels);
         $this->activeChannels = [];
 
         $this->loop->cancelTimer($this->idleCheck);

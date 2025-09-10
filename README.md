@@ -1,6 +1,8 @@
 # SSH server for ReactPHP
 
 [![CI status](https://github.com/williameggers/reactphp-ssh/workflows/CI/badge.svg)](https://github.com/williameggers/reactphp-ssh/actions)
+[![Latest Stable Version](http://poser.pugx.org/williameggers/reactphp-ssh-server/v)](https://packagist.org/packages/williameggers/reactphp-ssh-server)
+[![License](http://poser.pugx.org/williameggers/reactphp-ssh-server/license)](https://packagist.org/packages/williameggers/reactphp-ssh-server)
 
 This project is an event-driven, standalone SSH server implementation for [ReactPHP](https://reactphp.org/) developed by William Eggers. It extends the code from Ashley Hindle’s excellent [Whisp PHP SSH server](https://github.com/WhispPHP/whisp), with substantial modifications and refactoring to suit ReactPHP.
 

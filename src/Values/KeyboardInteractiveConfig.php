@@ -26,7 +26,7 @@
 
 namespace WilliamEggers\React\SSH\Values;
 
-final class KeyboardInteractiveConfig
+final readonly class KeyboardInteractiveConfig
 {
     /**
      * @param null|string                              $title       Optional title text displayed to the user
@@ -34,9 +34,9 @@ final class KeyboardInteractiveConfig
      * @param array<array{prompt: string, echo: bool}> $prompts     Array of prompts to present to the user
      */
     public function __construct(
-        public readonly ?string $title = null,
-        public readonly ?string $instruction = null,
-        public readonly array $prompts = [],
+        public ?string $title = null,
+        public ?string $instruction = null,
+        public array $prompts = [],
     ) {
         foreach ($this->prompts as $index => $prompt) {
             if (

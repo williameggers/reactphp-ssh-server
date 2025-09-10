@@ -26,9 +26,9 @@
 
 use phpseclib3\Net\SSH2;
 
-beforeEach(function () {
+beforeEach(function (): void {
     // Use a random available port for testing
-    $this->port = rand(49152, 65535);
+    $this->port = random_int(49152, 65535);
     $this->host = '127.0.0.1';
     // $this->server = new Server($this->port, $this->host);
 
@@ -67,7 +67,7 @@ PHP
     );
 });
 
-afterEach(function () {
+afterEach(function (): void {
     if (isset($this->server)) {
         $this->server->stop();
     }
@@ -104,7 +104,7 @@ afterEach(function () {
     }
 });
 
-test('creates and configures TCP socket correctly', function () {
+test('creates and configures TCP socket correctly', function (): void {
     // Start server in background using the script
     ['process' => $this->process, 'pid' => $pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -116,7 +116,7 @@ test('creates and configures TCP socket correctly', function () {
     fclose($socket);
 });
 
-test('accepts and handles new connections', function () {
+test('accepts and handles new connections', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -130,7 +130,7 @@ test('accepts and handles new connections', function () {
 
     while (microtime(true) - $startTime < 0.2) { // 200ms timeout
         $line = fgets($this->pipes[1]); // Read from stdout
-        if ($line && false !== strpos($line, '#1] Connection accepted from')) {
+        if ($line && str_contains($line, '#1] Connection accepted from')) {
             $connectionAccepted = true;
 
             break;
@@ -145,7 +145,7 @@ test('accepts and handles new connections', function () {
     fclose($clientSocket);
 });
 
-test('manages multiple connections', function () {
+test('manages multiple connections', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -169,7 +169,7 @@ test('manages multiple connections', function () {
         // Wait for data with 10ms timeout
         if (stream_select($read, $write, $except, 0, 10000) > 0) {
             $line = fgets($this->pipes[1]);
-            if ($line && false !== strpos($line, 'Connection accepted from')) {
+            if ($line && str_contains($line, 'Connection accepted from')) {
                 $childPids[] = $line;
             }
         }
@@ -185,7 +185,7 @@ test('manages multiple connections', function () {
     }
 })->skip(inGithubActions(), 'Not working on GitHub CI atm, but works wonderfully locally and on test servers');
 
-test('successful connection using phpseclib ssh client', function () {
+test('successful connection using phpseclib ssh client', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 

@@ -36,7 +36,7 @@ final class Kex
     private ?string $sessionId = null;
     private string $exchangeHash;
     private string $sharedSecret;
-    private LoggerInterface $logger;
+    private readonly LoggerInterface $logger;
 
     public function __construct(
         public Packet $packet,

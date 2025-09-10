@@ -30,11 +30,17 @@ use Psr\Log\AbstractLogger;
 use Psr\Log\LogLevel;
 use React\Stream\WritableResourceStream;
 
+/**
+ * FileLogger writes log messages to a file using a WritableResourceStream.
+ *
+ * Note: This logger is not safe to use with event loop libraries such as libuv in ReactPHP,
+ * as it relies on PHP's native file resources which may not be compatible with all event loop implementations.
+ */
 final class FileLogger extends AbstractLogger
 {
-    private WritableResourceStream $stream;
+    private readonly WritableResourceStream $stream;
 
-    public function __construct(private string $logFile)
+    public function __construct(private readonly string $logFile)
     {
         $this->stream = new WritableResourceStream(fopen($logFile, 'a')
             ?: throw new \RuntimeException('Failure opening ' . $logFile));

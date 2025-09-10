@@ -203,7 +203,7 @@ final class KexNegotiator
         ] = $fields;
 
         // The server must follow the client's preference order when selecting.
-        $select = function (array $clientList, array $serverList, string $label): string {
+        $select = static function (array $clientList, array $serverList, string $label): string {
             foreach ($clientList as $alg) {
                 if (in_array($alg, $serverList, true)) {
                     return $alg; // @phpstan-ignore-line

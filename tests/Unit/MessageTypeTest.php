@@ -26,15 +26,15 @@
 
 use WilliamEggers\React\SSH\Enums\MessageType;
 
-it('returns the correct character for DISCONNECT', function () {
+it('returns the correct character for DISCONNECT', function (): void {
     expect(MessageType::chr(MessageType::DISCONNECT))->toBe(chr(1));
 });
 
-it('returns the correct character for IGNORE', function () {
+it('returns the correct character for IGNORE', function (): void {
     expect(MessageType::chr(MessageType::IGNORE))->toBe(chr(2));
 });
 
-it('returns a single-character string for any MessageType case', function () {
+it('returns a single-character string for any MessageType case', function (): void {
     foreach (MessageType::cases() as $case) {
         $char = MessageType::chr($case);
         expect($char)->toBeString()
@@ -44,7 +44,7 @@ it('returns a single-character string for any MessageType case', function () {
     }
 });
 
-it('chr output matches ord of enum value', function () {
+it('chr output matches ord of enum value', function (): void {
     foreach (MessageType::cases() as $case) {
         expect(ord(MessageType::chr($case)))->toBe($case->value);
     }

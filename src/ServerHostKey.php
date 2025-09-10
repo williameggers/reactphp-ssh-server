@@ -68,12 +68,12 @@ final class ServerHostKey implements EventEmitterInterface
         if (file_exists($privateKeyPath) && file_exists($publicKeyPath)) {
             $privateKeyResource = fopen($privateKeyPath, 'r') ?: throw new \RuntimeException("Failed to open {$privateKeyPath}");
             buffer(new ReadableResourceStream($privateKeyResource))
-                ->then(function (mixed $contents) use ($publicKeyPath) {
+                ->then(function (mixed $contents) use ($publicKeyPath): void {
                     $this->privateKey = $contents;
 
                     $publicKeyResource = fopen($publicKeyPath, 'r') ?: throw new \RuntimeException("Failed to open {$publicKeyPath}");
                     buffer(new ReadableResourceStream($publicKeyResource))
-                        ->then(function (mixed $contents) {
+                        ->then(function (mixed $contents): void {
                             $this->publicKey = $contents;
                         })
                     ;

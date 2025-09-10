@@ -56,8 +56,8 @@ $server = (new Server('127.0.0.1:22'))
     ->enableAuthentication()
 ;
 
-$server->on('connection', function (Connection $connection) use ($authorizedPublicKeys) {
-    $connection->on('authenticate', function (string $username, string $method, array $credentials, Deferred $authenticated) use ($authorizedPublicKeys) {
+$server->on('connection', static function (Connection $connection) use ($authorizedPublicKeys): void {
+    $connection->on('authenticate', static function (string $username, string $method, array $credentials, Deferred $authenticated) use ($authorizedPublicKeys): void {
         /**
          * By this point, the supplied public key has already been verified via its signature
          * during the USERAUTH_REQUEST exchange by the server.
@@ -92,7 +92,7 @@ $server->on('connection', function (Connection $connection) use ($authorizedPubl
                  * @var array<string> $authorizedFingerprints
                  */
                 $authorizedFingerprints = array_map(
-                    fn ($keyString) => PublicKeyLoader::loadPublicKey($keyString)->getFingerprint('sha256'),
+                    static fn ($keyString) => PublicKeyLoader::loadPublicKey($keyString)->getFingerprint('sha256'),
                     $authorizedPublicKeys[$username] ?? []
                 );
 
@@ -103,7 +103,7 @@ $server->on('connection', function (Connection $connection) use ($authorizedPubl
                         break;
                     }
                 }
-            } catch (Throwable $e) {
+            } catch (Throwable) {
                 // Invalid key format — log or ignore as needed
             }
         }
@@ -111,8 +111,8 @@ $server->on('connection', function (Connection $connection) use ($authorizedPubl
         $authenticated->resolve($isAuthenticated);
     });
 
-    $connection->on('channel.open', function (Channel $channel) {
-        $channel->on('shell-request', function (Deferred $started) use ($channel) {
+    $connection->on('channel.open', static function (Channel $channel): void {
+        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
             $channel->end('Authenticated as ' . $channel->getConnection()->getUsername() . " via public key\r\n");
             $started->resolve(true);
         });

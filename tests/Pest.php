@@ -109,7 +109,7 @@ function wait_for_server_to_start($stdout, string $host, int $port, int $maxMs =
     $startTime = microtime(true);
     while (microtime(true) - $startTime < $maxMs / 1000) {
         $line = fgets($stdout);
-        if (false !== strpos($line, "Listening on {$host}:{$port}")) {
+        if (str_contains($line, "Listening on {$host}:{$port}")) {
             return true;
         }
     }
@@ -148,20 +148,11 @@ function start_server_and_wait_for_listening(string $scriptPath, string $host, i
  */
 function generateTestKeyPair(string $type = 'ed25519'): array
 {
-    switch (strtolower($type)) {
-        case 'rsa':
-            $key = RSA::createKey(2048);
-
-            break;
-
-        case 'ed25519':
-            $key = EC::createKey('Ed25519');
-
-            break;
-
-        default:
-            throw new InvalidArgumentException("Unsupported key type: {$type}");
-    }
+    $key = match (strtolower($type)) {
+        'rsa' => RSA::createKey(2048),
+        'ed25519' => EC::createKey('Ed25519'),
+        default => throw new InvalidArgumentException("Unsupported key type: {$type}"),
+    };
 
     return [
         'private' => $key->toString('PKCS8'),                      // PEM-encoded private key

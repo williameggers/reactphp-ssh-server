@@ -26,12 +26,12 @@
 
 namespace WilliamEggers\React\SSH\Values;
 
-final class WinSize
+final readonly class WinSize
 {
     public function __construct(
-        public readonly int $rows,      // Number of rows (in cells)
-        public readonly int $cols,      // Number of columns (in cells)
-        public readonly int $widthPixels = 0, // Width in pixels
-        public readonly int $heightPixels = 0  // Height in pixels
+        public int $rows,      // Number of rows (in cells)
+        public int $cols,      // Number of columns (in cells)
+        public int $widthPixels = 0, // Width in pixels
+        public int $heightPixels = 0  // Height in pixels
     ) {}
 }

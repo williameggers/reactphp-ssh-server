@@ -38,9 +38,9 @@ $server = (new Server('127.0.0.1:22'))
     )
 ;
 
-$server->on('connection', function (Connection $connection) {
-    $connection->on('channel.open', function (Channel $channel) {
-        $channel->on('shell-request', function (Deferred $started) use ($channel) {
+$server->on('connection', static function (Connection $connection): void {
+    $connection->on('channel.open', static function (Channel $channel): void {
+        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
             $channel->pipe($channel);
 
             $started->resolve(true);

@@ -28,9 +28,9 @@ use phpseclib3\Crypt\Common\PrivateKey;
 use phpseclib3\Crypt\PublicKeyLoader;
 use phpseclib3\Net\SSH2;
 
-beforeEach(function () {
+beforeEach(function (): void {
     // Use a random available port for testing
-    $this->port = rand(49152, 65535);
+    $this->port = random_int(49152, 65535);
     $this->host = '127.0.0.1';
     $this->rsaTestKeys = generateTestKeyPair('rsa');
     $this->ed25519TestKeys = generateTestKeyPair('ed25519');
@@ -132,7 +132,7 @@ PHP
     );
 });
 
-afterEach(function () {
+afterEach(function (): void {
     if (isset($this->server)) {
         $this->server->stop();
     }
@@ -169,7 +169,7 @@ afterEach(function () {
     }
 });
 
-test('successful authenticated connection using phpseclib ssh client', function () {
+test('successful authenticated connection using phpseclib ssh client', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -186,7 +186,7 @@ test('successful authenticated connection using phpseclib ssh client', function 
     $client->disconnect();
 });
 
-test('connection using phpseclib ssh client with invalid credentials', function () {
+test('connection using phpseclib ssh client with invalid credentials', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -199,7 +199,7 @@ test('connection using phpseclib ssh client with invalid credentials', function 
     $client->disconnect();
 });
 
-test('connection using phpseclib ssh client with private ed25519 key', function () {
+test('connection using phpseclib ssh client with private ed25519 key', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -214,7 +214,7 @@ test('connection using phpseclib ssh client with private ed25519 key', function 
     $client->disconnect();
 });
 
-test('connection using phpseclib ssh client with incorrect private key', function () {
+test('connection using phpseclib ssh client with incorrect private key', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -229,7 +229,7 @@ test('connection using phpseclib ssh client with incorrect private key', functio
     $client->disconnect();
 });
 
-test('connection using phpseclib ssh client with private rsa key', function () {
+test('connection using phpseclib ssh client with private rsa key', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 
@@ -244,7 +244,7 @@ test('connection using phpseclib ssh client with private rsa key', function () {
     $client->disconnect();
 });
 
-test('connection using phpseclib ssh client with non-authorized private ed25519 key', function () {
+test('connection using phpseclib ssh client with non-authorized private ed25519 key', function (): void {
     // Arrange
     ['process' => $this->process, 'pid' => $this->pid, 'pipes' => $this->pipes] = start_server_and_wait_for_listening($this->serverScript, $this->host, $this->port);
 

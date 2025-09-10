@@ -33,14 +33,14 @@ use WilliamEggers\React\SSH\Server;
 
 $server = new Server('127.0.0.1:22');
 
-$server->on('connection', function (Connection $connection) {
-    $connection->on('channel.open', function (Channel $channel) {
-        $channel->on('shell-request', function (Deferred $started) use ($channel) {
+$server->on('connection', static function (Connection $connection): void {
+    $connection->on('channel.open', static function (Channel $channel): void {
+        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
             $channel->write('Hello ' . $channel->getConnection()->getRemoteAddress() . "!\r\n");
             $channel->write("Welcome to this amazing SSH server!\r\n");
             $channel->write("Here's a tip: don't say anything.\r\n");
 
-            $channel->on('data', function ($data) use ($channel) {
+            $channel->on('data', static function ($data) use ($channel): void {
                 $channel->getConnection()->close();
             });
 
