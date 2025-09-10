@@ -2,6 +2,20 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.0.3 - 2025-09-10
+
+### Changed
+
+  * Enhanced the `Server` class to allow specifying a host key path directly
+    in the constructor, with updated PHPDoc to reflect the revised
+    parameters.
+  * Bumped the `Server` version to **1.0.3** to mark the change.
+
+### Added
+
+  * Introduced Rector to the project for automated refactoring support and
+    performed general code cleanup.
+
 ## 1.0.2 - 2025-09-05
 
 ### Changed
