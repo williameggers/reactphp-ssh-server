@@ -42,6 +42,10 @@ trait WritesLogs
         return $this;
     }
 
+    /**
+     * @param mixed        $level
+     * @param array<mixed> $context
+     */
     public function log($level, string|\Stringable $message, array $context = []): void
     {
         if (! isset($this->logger)) {

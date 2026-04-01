@@ -343,6 +343,39 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     }
 
     /**
+     * Sends SSH_MSG_CHANNEL_EOF for a channel if it is still open.
+     */
+    public function sendChannelEof(Channel $channel): void
+    {
+        if (! isset($this->activeChannels[$channel->getRecipientChannel()])) {
+            return;
+        }
+
+        $this->writePacked(MessageType::CHANNEL_EOF, $channel->getRecipientChannel());
+    }
+
+    /**
+     * Sends SSH_MSG_CHANNEL_CLOSE for a channel and marks it locally closed.
+     */
+    public function closeChannel(Channel $channel): void
+    {
+        $channelId = $channel->getRecipientChannel();
+
+        if (! isset($this->activeChannels[$channelId]) || $channel->hasSentClose()) {
+            return;
+        }
+
+        $this->writePacked(MessageType::CHANNEL_CLOSE, $channelId);
+        $channel->markCloseSent();
+
+        if ($channel->hasReceivedClose()) {
+            $channel->finalizeClose();
+            unset($this->activeChannels[$channelId]);
+            $this->emit('channel.close', [$channelId]);
+        }
+    }
+
+    /**
      * Returns the full remote address (URI) where this connection has been established.
      */
     public function getRemoteAddress(): ?string
@@ -911,20 +944,27 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                     [$command] = $packet->extractFormat('%s');
                     $this->info("Received exec request with command: {$command}");
 
+                    $channel->beginRequestReply();
                     $deferred = new Deferred();
                     $channel->emit('exec-request', [$command, $deferred]);
 
                     /** @var PromiseInterface<bool> $execRequestPromise */
                     $execRequestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
-                    $execRequestPromise->then(function (bool $started) use ($wantReply, $channelSuccessReply, $channelFailureReply): void {
+                    $execRequestPromise->then(function (bool $started) use ($channel, $wantReply, $channelSuccessReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->writeConnection($started ? $channelSuccessReply : $channelFailureReply);
                         }
-                    })->catch(function (\Throwable $e) use ($wantReply, $channelFailureReply): void {
+
+                        $channel->completeRequestReply();
+                        $channel->flushQueuedCloseOperations();
+                    })->catch(function (\Throwable $e) use ($channel, $wantReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->error($e->getMessage());
                             $this->writeConnection($channelFailureReply);
                         }
+
+                        $channel->completeRequestReply();
+                        $channel->flushQueuedCloseOperations();
                     });
 
                     return;
@@ -939,20 +979,27 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
             case 'shell':
                 if (count($channel->listeners('shell-request')) > 0) {
+                    $channel->beginRequestReply();
                     $deferred = new Deferred();
                     $channel->emit('shell-request', [$deferred]);
 
                     /** @var PromiseInterface<bool> $shellRequestPromise */
                     $shellRequestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
-                    $shellRequestPromise->then(function (bool $started) use ($wantReply, $channelSuccessReply, $channelFailureReply): void {
+                    $shellRequestPromise->then(function (bool $started) use ($channel, $wantReply, $channelSuccessReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->writeConnection($started ? $channelSuccessReply : $channelFailureReply);
                         }
-                    })->catch(function (\Throwable $e) use ($wantReply, $channelFailureReply): void {
+
+                        $channel->completeRequestReply();
+                        $channel->flushQueuedCloseOperations();
+                    })->catch(function (\Throwable $e) use ($channel, $wantReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->error($e->getMessage());
                             $this->writeConnection($channelFailureReply);
                         }
+
+                        $channel->completeRequestReply();
+                        $channel->flushQueuedCloseOperations();
                     });
 
                     return;
@@ -1043,13 +1090,16 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         }
 
         $channel = $this->activeChannels[$channelId];
+        $channel->markCloseReceived();
 
-        $channel->close();
+        if (! $channel->hasSentClose()) {
+            $this->writePacked(MessageType::CHANNEL_CLOSE, $channelId);
+            $channel->markCloseSent();
+        }
+
+        $channel->finalizeClose();
         unset($this->activeChannels[$channelId]);
         $this->emit('channel.close', [$channelId]);
-
-        // Send close back to the client
-        $this->writePacked(MessageType::CHANNEL_CLOSE, $channelId);
     }
 
     /**
@@ -1662,7 +1712,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private function cleanup(): void
     {
         // Close all active channels
-        array_map(static fn (Channel $channel) => $channel->close(), $this->activeChannels);
+        array_map(static fn (Channel $channel) => $channel->finalizeClose(), $this->activeChannels);
         $this->activeChannels = [];
 
         $this->loop->cancelTimer($this->idleCheck);

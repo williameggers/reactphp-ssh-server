@@ -31,14 +31,12 @@ use WilliamEggers\React\SSH\Channel;
 use WilliamEggers\React\SSH\Connection;
 use WilliamEggers\React\SSH\Server;
 
-$server = (new Server('127.0.0.1:22'))
+$server = (new Server('127.0.0.1:2222'))
     ->enableAuthentication()
 ;
 
 $server->on('connection', static function (Connection $connection): void {
-    /**
-     * @param Deferred<bool> $authenticated Deferred that must be resolved with a boolean indicating authentication success.
-     */
+    // @param Deferred<bool> $authenticated Deferred that must be resolved with a boolean indicating authentication success.
     $connection->on('authenticate', static function (string $username, string $method, array $credentials, Deferred $authenticated): void {
         $isAuthenticated = false;
         $password = $credentials[0] ?? null;
@@ -56,9 +54,8 @@ $server->on('connection', static function (Connection $connection): void {
 
     $connection->on('channel.open', static function (Channel $channel): void {
         $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
-            $channel->end('Authenticated as ' . $channel->getConnection()->getUsername() . "!\r\n");
-
             $started->resolve(true);
+            $channel->end('Authenticated as ' . $channel->getConnection()->getUsername() . "!\r\n");
         });
     });
 });

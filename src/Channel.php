@@ -47,6 +47,12 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
     private bool $inputClosed = false;
     private bool $outputClosed = false;
+    private bool $eofSent = false;
+    private bool $closeSent = false;
+    private bool $closeReceived = false;
+    private bool $requestReplyPending = false;
+    private bool $queueEofAfterReply = false;
+    private bool $queueCloseAfterReply = false;
 
     private array $env = [];
 
@@ -203,6 +209,86 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
     public function close(): void
     {
+        if ($this->closeSent || $this->closeReceived) {
+            return;
+        }
+
+        if ($this->requestReplyPending) {
+            $this->queueCloseAfterReply = true;
+            $this->outputClosed = true;
+
+            return;
+        }
+
+        $this->connection->closeChannel($this);
+    }
+
+    public function markCloseSent(): void
+    {
+        $this->outputClosed = true;
+        $this->closeSent = true;
+    }
+
+    public function markCloseReceived(): void
+    {
+        $this->inputClosed = true;
+        $this->outputClosed = true;
+        $this->closeReceived = true;
+    }
+
+    public function hasSentClose(): bool
+    {
+        return $this->closeSent;
+    }
+
+    public function hasReceivedClose(): bool
+    {
+        return $this->closeReceived;
+    }
+
+    public function beginRequestReply(): void
+    {
+        $this->requestReplyPending = true;
+    }
+
+    public function completeRequestReply(): void
+    {
+        $this->requestReplyPending = false;
+    }
+
+    public function hasPendingRequestReply(): bool
+    {
+        return $this->requestReplyPending;
+    }
+
+    public function shouldSendQueuedEof(): bool
+    {
+        return $this->queueEofAfterReply && ! $this->eofSent;
+    }
+
+    public function shouldSendQueuedClose(): bool
+    {
+        return $this->queueCloseAfterReply && ! $this->closeSent && ! $this->closeReceived;
+    }
+
+    public function flushQueuedCloseOperations(): void
+    {
+        if ($this->shouldSendQueuedEof()) {
+            $this->connection->sendChannelEof($this);
+            $this->eofSent = true;
+            $this->queueEofAfterReply = false;
+        }
+
+        if ($this->shouldSendQueuedClose()) {
+            $this->queueCloseAfterReply = false;
+            $this->connection->closeChannel($this);
+        }
+    }
+
+    public function finalizeClose(): void
+    {
+        $this->inputClosed = true;
+        $this->outputClosed = true;
         $this->senderChannelStream->close();
         $this->removeAllListeners();
     }
@@ -243,6 +329,10 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
     public function end(mixed $data = null): void
     {
+        if ($this->closeSent || $this->closeReceived) {
+            return;
+        }
+
         if (! is_null($data)) {
             if (! is_scalar($data) && ! (\is_object($data) && method_exists($data, '__toString'))) {
                 throw new \InvalidArgumentException('Data must be stringable');
@@ -250,7 +340,20 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
             $this->connection->writeChannelData($this, (string) $data);
         }
 
-        $this->connection->end(null);
+        if (! $this->eofSent) {
+            if ($this->requestReplyPending) {
+                $this->queueEofAfterReply = true;
+                $this->queueCloseAfterReply = true;
+                $this->outputClosed = true;
+
+                return;
+            }
+
+            $this->connection->sendChannelEof($this);
+            $this->eofSent = true;
+        }
+
+        $this->connection->closeChannel($this);
     }
 
     /**

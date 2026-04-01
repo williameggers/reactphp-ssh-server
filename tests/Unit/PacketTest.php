@@ -108,7 +108,8 @@ test('handles all formats together at once', function (): void {
 
     expect($str)->toBe('howdy')
         ->and($int1)->toBe(420)
-        ->and($bool)->toBeTrue();
+        ->and($bool)->toBeTrue()
+    ;
 });
 
 // SSH_MSG_USERAUTH_REQUEST simulation
@@ -117,10 +118,10 @@ it('extracts username, service, and method from SSH_MSG_USERAUTH_REQUEST', funct
     $service = 'ssh-connection';
     $method = 'password';
 
-    $payload = chr(50) .
-               pack('N', strlen($username)) . $username .
-               pack('N', strlen($service)) . $service .
-               pack('N', strlen($method)) . $method;
+    $payload = chr(50)
+               . pack('N', strlen($username)) . $username
+               . pack('N', strlen($service)) . $service
+               . pack('N', strlen($method)) . $method;
 
     $packet = new Packet($payload);
     expect($packet->type)->toBe(MessageType::USERAUTH_REQUEST);

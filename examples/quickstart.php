@@ -31,7 +31,7 @@ use WilliamEggers\React\SSH\Channel;
 use WilliamEggers\React\SSH\Connection;
 use WilliamEggers\React\SSH\Server;
 
-$server = new Server('127.0.0.1:22');
+$server = new Server('127.0.0.1:2222');
 
 $server->on('connection', static function (Connection $connection): void {
     $connection->on('channel.open', static function (Channel $channel): void {

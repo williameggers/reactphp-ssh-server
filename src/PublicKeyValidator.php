@@ -516,8 +516,24 @@ final class PublicKeyValidator
 
             // Export as PEM (PKCS8 format)
             $pemResult = $key->toString('PKCS8');
+            if (is_string($pemResult)) {
+                return $pemResult;
+            }
 
-            return is_array($pemResult) ? implode('', $pemResult) : (string) $pemResult;
+            if (is_array($pemResult)) {
+                $pemParts = [];
+                foreach ($pemResult as $pemPart) {
+                    if (! is_string($pemPart)) {
+                        throw new \UnexpectedValueException('Expected PEM export parts to be strings');
+                    }
+
+                    $pemParts[] = $pemPart;
+                }
+
+                return implode('', $pemParts);
+            }
+
+            throw new \UnexpectedValueException('Unexpected PEM export type');
         } catch (\Exception $e) {
             $this->error('Failed to create PEM from components: ' . $e->getMessage());
 

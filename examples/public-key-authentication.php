@@ -52,7 +52,7 @@ $authorizedPublicKeys = [
     ],
 ];
 
-$server = (new Server('127.0.0.1:22'))
+$server = (new Server('127.0.0.1:2222'))
     ->enableAuthentication()
 ;
 
@@ -113,8 +113,8 @@ $server->on('connection', static function (Connection $connection) use ($authori
 
     $connection->on('channel.open', static function (Channel $channel): void {
         $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
-            $channel->end('Authenticated as ' . $channel->getConnection()->getUsername() . " via public key\r\n");
             $started->resolve(true);
+            $channel->end('Authenticated as ' . $channel->getConnection()->getUsername() . " via public key\r\n");
         });
     });
 });

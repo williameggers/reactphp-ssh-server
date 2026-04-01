@@ -82,7 +82,7 @@ use WilliamEggers\React\SSH\Server;
 use WilliamEggers\React\SSH\Connection;
 use WilliamEggers\React\SSH\Channel;
 
-$server = new Server('127.0.0.1:22');
+$server = new Server('127.0.0.1:2222');
 
 $server->on('connection', function (Connection $connection) {
     /*
@@ -173,7 +173,7 @@ $server->on('connection', function (Connection $connection) {
 
 * **error** - emitted when there's an error accepting a new connection from a client.
     ```php
-    $socket->on('error', function (Exception $e) {
+    $server->on('error', function (Exception $e) {
         echo 'error: ' . $e->getMessage() . PHP_EOL;
     });
     ```
@@ -195,6 +195,30 @@ $server->on('connection', function (Connection $connection) {
 * **disableAuthentication(): self**
 
     Disables user authentication. When disabled, all connections are considered authenticated automatically, and the authenticate event will not be emitted. This is useful for development or internal services, or services that provide an alternate authentication approach. Returns the server instance for chaining.
+
+* **addServerHostKey(ServerHostKey $hostKey): self**
+
+    Registers an additional server host key that may be advertised during key exchange. This allows you to supply your own host key material or extend the default host key set.
+
+* **getAddress(): ?string**
+
+    Returns the full listening address for the server socket, such as `tcp://127.0.0.1:2222`.
+
+* **setLogger(Psr\Log\LoggerInterface $logger): self**
+
+    Sets the PSR-3 logger used by the server and propagated to new connections.
+
+* **pause(): void**
+
+    Temporarily stops accepting new incoming connections without closing the listening socket.
+
+* **resume(): void**
+
+    Resumes accepting new incoming connections after a previous `pause()`.
+
+* **close(): void**
+
+    Stops listening for new incoming connections and closes the server socket.
 
 ## Connection usage
 
@@ -317,6 +341,12 @@ $connection->close();
 
     **Signature:** `function (int $channelId): void`
 
+* **channel.data** - emitted when raw data is received for an open channel.
+
+    This is emitted on the `Connection` with the channel ID and payload after the data has been forwarded to the corresponding `Channel` instance.
+
+    **Signature:** `function (int $channelId, string $data): void`
+
 * **close** - emitted when the connection is terminated.
 
     **Signature:** `function (): void`
@@ -368,9 +398,25 @@ $connection->close();
     the address `0.0.0.0`), you can use this method to find out which interface
     actually accepted this connection (such as a public or local interface).
 
-    If your system has multiple interfaces (e.g. a WAN and a LAN interface),
-    you can use this method to find out which interface was actually
-    used for this connection.
+     If your system has multiple interfaces (e.g. a WAN and a LAN interface),
+     you can use this method to find out which interface was actually
+     used for this connection.
+
+* **getChannel(int $channelId): ?Channel**
+
+    Returns the active `Channel` instance for the given channel ID, or `null` if that channel does not exist or has already been closed.
+
+* **getUsername(): ?string**
+
+    Returns the authenticated username for this connection, if one has been established.
+
+* **setKeyboardInteractiveConfig(KeyboardInteractiveConfig $config): self**
+
+    Configures the prompts and instructions used for keyboard-interactive authentication on this connection.
+
+* **setLogger(Psr\Log\LoggerInterface $logger): self**
+
+    Sets the PSR-3 logger used by this connection and its internal protocol helpers.
 
 ### Channel class
 
@@ -395,12 +441,18 @@ In addition to channel-specific methods, the `Channel` class implements the [`Ev
     ```php
     $channel->on('data', function (string $data) use ($channel) {
         // Log or process the data received from the client
-        echo "Received data from client ({$channel->recipientChannel}): " . trim($data) . PHP_EOL;
+        echo 'Received data from client (' . $channel->getRecipientChannel() . '): ' . trim($data) . PHP_EOL;
 
         // Optionally, echo the data back to the client
         $channel->write("You said: " . $data);
     });
     ```
+
+* **pty-request** - emitted when the client requests a pseudo-terminal (PTY) for the channel.
+
+    This event is emitted after terminal information has been parsed and stored on the `Channel`. If no listener is registered, PTY requests are accepted automatically.
+
+    **Signature:** `function (Deferred $started): void`
 
 * <a id="channel-exec-request-event"></a>**exec-request**  - emitted when the client sends an exec request to run a single command (e.g., `ssh user@host ls -la`).
 
@@ -454,7 +506,7 @@ This is often used to interrupt a long-running command or to cancel a session gr
 
 * **close()**
 
-    Closes the channel from the server side, sending an SSH_MSG_CHANNEL_CLOSE to the client. This indicates that no further data will be sent in either direction and the channel should be fully torn down.
+    Closes this SSH channel from the server side by sending `SSH_MSG_CHANNEL_CLOSE` to the client. This affects only the channel, not the underlying SSH connection.
 
 * **getEnvironmentVariables(): array**
 
@@ -476,28 +528,75 @@ This is often used to interrupt a long-running command or to cancel a session gr
 
     Returns an instance of [`TerminalInfo`](https://github.com/williameggers/reactphp-ssh/blob/master/src/Values/TerminalInfo.php) if the client has requested a pseudo-terminal (PTY) during session setup. This includes details such as terminal type, dimensions, and terminal mode flags. Returns null if no PTY was requested.
 
+* **getRecipientChannel(): int**
+
+    Returns the channel ID assigned by the client for this channel.
+
+* **getSenderChannel(): int**
+
+    Returns the channel ID assigned by the server for this channel.
+
+* **getWindowSize(): int**
+
+    Returns the current channel window size in bytes.
+
+* **getMaxPacketSize(): int**
+
+    Returns the maximum packet size for this channel.
+
 * **write($data)**
 
     Sends a string of data back to the client over the channel using SSH_MSG_CHANNEL_DATA. This is the primary method for server-side output in shell sessions, exec commands, or other interactive flows.
 
+* **end($data = null)**
+
+    Optionally sends final data, then ends this SSH channel by sending `SSH_MSG_CHANNEL_EOF` followed by `SSH_MSG_CHANNEL_CLOSE`. This affects only the channel, not the underlying SSH connection.
+
+* **pause(): void**
+
+    Pauses reading application data from this channel.
+
+* **resume(): void**
+
+    Resumes reading application data from this channel.
+
+* **isReadable(): bool**
+
+    Indicates whether the channel can currently emit application data.
+
+* **isWritable(): bool**
+
+    Indicates whether the channel can currently send data to the client.
+
 ## Supported algorithms
+
+The negotiated algorithm lists are defined in `KexNegotiator`.
 
 ### Key exchange methods
 
 The following key exchange methods are supported:
 
-* curve25519-sha256[]()@libssh.org
-* diffie-hellman-group14-sha1
+* curve25519-sha256
+* curve25519-sha256@libssh.org
+* diffie-hellman-group14-sha256
+
+### Server host key algorithms
+
+The following server host key algorithms are supported:
+
+* ssh-ed25519
+* rsa-sha2-256
+* rsa-sha2-512
 
 ### Encryption algorithms
 
 The following encryption algorithms are supported:
 
 * aes128-ctr
-* aes128-gcm[]()@openssh.com
+* aes128-gcm@openssh.com
 * aes192-ctr
 * aes256-ctr
-* aes256-gcm[]()@openssh.com
+* aes256-gcm@openssh.com
 
 ### MAC algorithms
 

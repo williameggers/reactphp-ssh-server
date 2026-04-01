@@ -41,12 +41,14 @@ final class KexNegotiator
      */
     private ?array $negotiatedAlgorithms = null;
 
+    /** @var list<string> */
     private array $acceptedUserKeyAlgorithms = [
         'ssh-ed25519',
         'rsa-sha2-256',
         'rsa-sha2-512',
     ];
 
+    /** @var list<string> */
     private array $kexAlgorithms = [
         'curve25519-sha256',                 // Most modern and recommended
         'curve25519-sha256@libssh.org',      // Same as above but with older OpenSSH compatibility tag
@@ -54,6 +56,7 @@ final class KexNegotiator
         // 'ecdh-sha2-nistp256',             // Widely supported backup; not implemented yet
     ];
 
+    /** @var list<string> */
     private array $serverHostKeyAlgorithms = [
         'ssh-ed25519',                       // Modern, secure, and efficient
         'rsa-sha2-256',                      // RSA using SHA-256; widely supported and more secure than legacy ssh-rsa
@@ -61,6 +64,7 @@ final class KexNegotiator
         // 'ssh-rsa',                        // Deprecated and insecure; removed due to SHA-1 vulnerabilities
     ];
 
+    /** @var list<string> */
     private array $encryptionAlgorithms = [
         // 'chacha20-poly1305@openssh.com',  // Modern, high-performance cipher with built-in authentication; not implemented yet
         'aes256-gcm@openssh.com',            // Strong AES cipher with 256-bit key in GCM mode (authenticated encryption)
@@ -70,6 +74,7 @@ final class KexNegotiator
         'aes128-ctr',                        // AES-128 in CTR mode; requires separate MAC; widely supported
     ];
 
+    /** @var list<string> */
     private array $macAlgorithms = [
         // 'hmac-sha2-512-etm@openssh.com',  // Encrypt-then-MAC with SHA-512; modern and secure; not implemented yet
         // 'hmac-sha2-256-etm@openssh.com',  // Encrypt-then-MAC with SHA-256; modern and widely supported; not implemented yet
@@ -78,6 +83,7 @@ final class KexNegotiator
         'hmac-sha1',                         // Legacy MAC for compatibility with older clients; SHA-1 is considered weak
     ];
 
+    /** @var list<string> */
     private array $compressionAlgorithms = [
         'none',
     ];
@@ -174,6 +180,7 @@ final class KexNegotiator
         $offset = 16; // skip 16-byte cookie
 
         // SSH KEXINIT contains 10 name-list fields; we'll extract them in order:
+        /** @var list<list<string>> $fields */
         $fields = [];
         for ($i = 0; $i < 10; ++$i) {
             $length = (unpack('N', substr($clientPacket, $offset, 4)) ?: [])[1] ?? null;
@@ -189,6 +196,21 @@ final class KexNegotiator
             $offset += $length;
         }
 
+        /*
+         * @var array{
+         *     0: list<string>,
+         *     1: list<string>,
+         *     2: list<string>,
+         *     3: list<string>,
+         *     4: list<string>,
+         *     5: list<string>,
+         *     6: list<string>,
+         *     7: list<string>,
+         *     8: list<string>,
+         *     9: list<string>
+         * } $fields
+         */
+
         [
             $clientKexAlgs,
             $clientHostKeyAlgs,
@@ -202,26 +224,15 @@ final class KexNegotiator
             $langStoC,
         ] = $fields;
 
-        // The server must follow the client's preference order when selecting.
-        $select = static function (array $clientList, array $serverList, string $label): string {
-            foreach ($clientList as $alg) {
-                if (in_array($alg, $serverList, true)) {
-                    return $alg; // @phpstan-ignore-line
-                }
-            }
-
-            throw new \RuntimeException("No common algorithm found for {$label}. Client supported values: " . implode(',', $clientList));
-        };
-
         $this->negotiatedAlgorithms = [
-            'kex' => $select($clientKexAlgs, $this->kexAlgorithms, 'kex'),
-            'hostkey' => $select($clientHostKeyAlgs, $this->serverHostKeyAlgorithms, 'hostkey'),
-            'encryption_ctos' => $select($clientEncCtoS, $this->encryptionAlgorithms, 'encryption_ctos'),
-            'encryption_stoc' => $select($clientEncStoC, $this->encryptionAlgorithms, 'encryption_stoc'),
-            'mac_ctos' => $select($clientMacCtoS, $this->macAlgorithms, 'mac_ctos'),
-            'mac_stoc' => $select($clientMacStoC, $this->macAlgorithms, 'mac_stoc'),
-            'compression_ctos' => $select($clientCompCtoS, $this->compressionAlgorithms, 'compression_ctos'),
-            'compression_stoc' => $select($clientCompStoC, $this->compressionAlgorithms, 'compression_stoc'),
+            'kex' => $this->selectAlgorithm($clientKexAlgs, $this->kexAlgorithms, 'kex'),
+            'hostkey' => $this->selectAlgorithm($clientHostKeyAlgs, $this->serverHostKeyAlgorithms, 'hostkey'),
+            'encryption_ctos' => $this->selectAlgorithm($clientEncCtoS, $this->encryptionAlgorithms, 'encryption_ctos'),
+            'encryption_stoc' => $this->selectAlgorithm($clientEncStoC, $this->encryptionAlgorithms, 'encryption_stoc'),
+            'mac_ctos' => $this->selectAlgorithm($clientMacCtoS, $this->macAlgorithms, 'mac_ctos'),
+            'mac_stoc' => $this->selectAlgorithm($clientMacStoC, $this->macAlgorithms, 'mac_stoc'),
+            'compression_ctos' => $this->selectAlgorithm($clientCompCtoS, $this->compressionAlgorithms, 'compression_ctos'),
+            'compression_stoc' => $this->selectAlgorithm($clientCompStoC, $this->compressionAlgorithms, 'compression_stoc'),
         ];
 
         return $this->negotiatedAlgorithms;
@@ -259,5 +270,20 @@ final class KexNegotiator
     private function packString(string $str): string
     {
         return pack('N', strlen($str)) . $str;
+    }
+
+    /**
+     * @param list<string> $clientList
+     * @param list<string> $serverList
+     */
+    private function selectAlgorithm(array $clientList, array $serverList, string $label): string
+    {
+        foreach ($clientList as $algorithm) {
+            if (in_array($algorithm, $serverList, true)) {
+                return $algorithm;
+            }
+        }
+
+        throw new \RuntimeException('No common algorithm found for ' . $label . '. Client supported values: ' . implode(',', $clientList));
     }
 }

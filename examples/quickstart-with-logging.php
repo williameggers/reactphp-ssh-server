@@ -32,7 +32,7 @@ use WilliamEggers\React\SSH\Connection;
 use WilliamEggers\React\SSH\Loggers\ConsoleLogger;
 use WilliamEggers\React\SSH\Server;
 
-$server = new Server('127.0.0.1:22');
+$server = new Server('127.0.0.1:2222');
 $server->setLogger(new ConsoleLogger());
 
 $server->on('connection', static function (Connection $connection): void {
@@ -52,9 +52,8 @@ $server->on('connection', static function (Connection $connection): void {
 
         $channel->on('exec-request', static function (string $command, Deferred $started) use ($channel): void {
             $channel->debug('Channel command: ' . $command);
-            $channel->end("Requested command: {$command}\r\n");
-
             $started->resolve(true);
+            $channel->end("Requested command: {$command}\r\n");
         });
     });
 });

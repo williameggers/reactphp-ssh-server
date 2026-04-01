@@ -31,7 +31,7 @@ use WilliamEggers\React\SSH\Server;
 
 require __DIR__ . '/../vendor/autoload.php';
 
-$server = (new Server('127.0.0.1:22'))
+$server = (new Server('127.0.0.1:2222'))
     ->setBanner(
         "This service is provided for testing and demonstration only.\r\n"
         . "All input will be echoed back verbatim. No commands will be executed.\r\n\r\n"

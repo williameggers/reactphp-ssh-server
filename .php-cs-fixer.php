@@ -1,5 +1,18 @@
-<?php
-return (new PhpCsFixer\Config())
+<?php declare(strict_types=1);
+
+use PhpCsFixer\Config;
+use PhpCsFixer\Finder;
+
+$finder = Finder::create()
+    ->files()
+    ->in([
+        __DIR__ . '/src',
+        __DIR__ . '/tests',
+        __DIR__ . '/examples',
+    ])
+;
+
+return (new Config())
     ->setRiskyAllowed(true)
     ->setRules([
         '@PSR12' => true,
@@ -47,9 +60,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.",
     ],
         'unary_operator_spaces' => true,
         'trim_array_spaces' => true,
-        'declare_strict_types' => true,
         'linebreak_after_opening_tag' => false,
         'blank_line_after_opening_tag' => false,
     ])
     ->setLineEnding("\n")
+    ->setFinder($finder)
 ;

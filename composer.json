@@ -5,7 +5,11 @@
     "type": "library",
     "license": "BSD-2-Clause",
     "scripts": {
-        "test": "vendor/bin/pest"
+        "test": "vendor/bin/pest",
+        "test:ci": "vendor/bin/pest --ci",
+        "phpstan": "vendor/bin/phpstan analyse",
+        "cs:check": "vendor/bin/php-cs-fixer fix --dry-run --diff",
+        "cs:fix": "vendor/bin/php-cs-fixer fix"
     },
     "authors": [
         {

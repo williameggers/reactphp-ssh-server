@@ -178,7 +178,6 @@ final class ServerHostKey implements EventEmitterInterface
      * Write file stream.
      *
      * @param resource $stream
-     * @param mixed    $data
      */
     private function writeFileStream($stream, mixed $data): bool // @pest-ignore-type
     {

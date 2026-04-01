@@ -2,6 +2,12 @@ ARG PHP_VERSION
 
 FROM mcr.microsoft.com/devcontainers/php:1-${PHP_VERSION}
 
+RUN mkdir -p /usr/share/keyrings && \
+    curl -fsSL https://dl.yarnpkg.com/debian/pubkey.gpg \
+      | gpg --dearmor -o /usr/share/keyrings/yarn.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/yarn.gpg] https://dl.yarnpkg.com/debian stable main" \
+      > /etc/apt/sources.list.d/yarn.list
+
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \
     apt-get install -y libffi-dev && \
     docker-php-ext-install pcntl && \
