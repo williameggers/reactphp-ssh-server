@@ -2,6 +2,19 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.0.4 - 2026-04-01
+
+### Fixed
+
+  * Corrected SSH channel shutdown behavior so `Channel::end()` and `Channel::close()` only close the active channel instead of terminating the underlying SSH connection.
+  * Deferred channel EOF and close packets until pending exec and shell request replies have been sent, preventing reply and close ordering issues.
+  * Improved server host key initialization so the server waits for host keys to be ready before accepting connections, including compatibility with loops that cannot watch regular files as streams.
+
+### Changed
+
+  * Updated the README and examples to reflect the clarified channel lifecycle and exposed server and connection APIs.
+  * Hardened algorithm and key material handling with stricter validation during negotiation and PEM export.
+
 ## 1.0.3 - 2025-09-10
 
 ### Changed
