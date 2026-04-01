@@ -124,27 +124,56 @@ expect()->extend('toNotBeRunning', function (int $maxMs = 1000) {
  * Wait for the server to start listening.
  *
  * @param resource $stdout
+ * @param resource $stderr
  *
  * @return bool
  */
-function wait_for_server_to_start($stdout, string $host, int $port, int $maxMs = 300)
+function wait_for_server_to_start($stdout, $stderr, string $host, int $port, int $maxMs = 1000)
 {
-    // Wait for a maximum of 300ms, proceed once we've read '$host:$port' from the stdout of the server process
+    stream_set_blocking($stdout, false);
+    stream_set_blocking($stderr, false);
+
+    $stdoutBuffer = '';
+    $stderrBuffer = '';
     $startTime = microtime(true);
     while (microtime(true) - $startTime < $maxMs / 1000) {
         $line = fgets($stdout);
-        if (str_contains($line, "Listening on {$host}:{$port}")) {
+        if (is_string($line)) {
+            $stdoutBuffer .= $line;
+            if (str_contains($line, "Listening on {$host}:{$port}")) {
+                return true;
+            }
+        }
+
+        $errorLine = fgets($stderr);
+        if (is_string($errorLine)) {
+            $stderrBuffer .= $errorLine;
+        }
+
+        set_error_handler(static fn (): bool => true);
+        $socket = fsockopen($host, $port, $errno, $errstr, 0.05);
+        restore_error_handler();
+
+        if (is_resource($socket)) {
+            fclose($socket);
+
             return true;
         }
+
+        usleep(10000);
     }
 
-    throw new RuntimeException('Server did not start within ' . $maxMs . 'ms');
+    throw new RuntimeException(
+        'Server did not start within ' . $maxMs . 'ms'
+        . ('' !== $stdoutBuffer ? ' | stdout: ' . trim($stdoutBuffer) : '')
+        . ('' !== $stderrBuffer ? ' | stderr: ' . trim($stderrBuffer) : '')
+    );
 }
 
 /**
  * Start the server and wait for it to start listening.
  */
-function start_server_and_wait_for_listening(string $scriptPath, string $host, int $port, int $maxMs = 300): array
+function start_server_and_wait_for_listening(string $scriptPath, string $host, int $port, int $maxMs = 1000): array
 {
     $descriptorSpec = [
         0 => ['pipe', 'r'],  // stdin
@@ -158,7 +187,7 @@ function start_server_and_wait_for_listening(string $scriptPath, string $host, i
         throw new RuntimeException('Failed to start server process');
     }
 
-    wait_for_server_to_start($pipes[1], $host, $port, $maxMs);
+    wait_for_server_to_start($pipes[1], $pipes[2], $host, $port, $maxMs);
 
     return ['process' => $process, 'pid' => proc_get_status($process)['pid'], 'pipes' => $pipes];
 }

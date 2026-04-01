@@ -25,6 +25,8 @@
  */
 
 use phpseclib3\Net\SSH2;
+use React\EventLoop\StreamSelectLoop;
+use WilliamEggers\React\SSH\Server;
 
 beforeEach(function (): void {
     // Use a random available port for testing
@@ -69,7 +71,7 @@ PHP
 
 afterEach(function (): void {
     if (isset($this->server)) {
-        $this->server->stop();
+        $this->server->close();
     }
 
     if (file_exists($this->serverScript)) {
@@ -201,4 +203,37 @@ test('successful connection using phpseclib ssh client', function (): void {
     expect($client->isConnected())->toBeTrue('phpseclib ssh2 client connected successfully');
 
     $client->disconnect();
+});
+
+test('resumes accepting connections once asynchronous host keys are ready', function (): void {
+    $loop = new StreamSelectLoop();
+    $baseDir = sys_get_temp_dir() . '/reactphp_ssh_server_host_keys_' . uniqid();
+    mkdir($baseDir, 0700, true);
+    file_put_contents($baseDir . '/ssh_host_ed25519_key', 'private-key');
+    file_put_contents($baseDir . '/ssh_host_ed25519_key.pub', 'public-key');
+    file_put_contents($baseDir . '/ssh_host_rsa_key', 'rsa-private-key');
+    file_put_contents($baseDir . '/ssh_host_rsa_key.pub', 'rsa-public-key');
+
+    $server = new Server('tcp://127.0.0.1:0', loop: $loop, hostKeyPath: $baseDir);
+
+    $pendingHostKeys = new ReflectionProperty($server, 'pendingHostKeys');
+
+    expect($pendingHostKeys->getValue($server))->toBe(2);
+
+    $loop->addTimer(0.1, static function () use ($loop): void {
+        $loop->stop();
+    });
+
+    $loop->run();
+
+    expect($pendingHostKeys->getValue($server))->toBe(0);
+
+    $server->close();
+
+    foreach (glob($baseDir . '/*') ?: [] as $file) {
+        if (is_file($file)) {
+            unlink($file);
+        }
+    }
+    rmdir($baseDir);
 });

@@ -134,7 +134,7 @@ PHP
 
 afterEach(function (): void {
     if (isset($this->server)) {
-        $this->server->stop();
+        $this->server->close();
     }
 
     if (file_exists($this->serverScript)) {

@@ -53,8 +53,9 @@ final class Server extends EventEmitter implements ServerInterface
      * @var array<string, ServerHostKey>
      */
     private array $hostKeys;
-    private ServerInterface $tcpServer;
+    private ?ServerInterface $tcpServer = null;
     private LoopInterface $loop;
+    private int $pendingHostKeys = 0;
 
     private int $connectionId = 0;
 
@@ -84,10 +85,11 @@ final class Server extends EventEmitter implements ServerInterface
 
         // Initialize and register server host keys for supported SSH host key algorithms.
         // These keys will be advertised during the key exchange phase to authenticate the server.
-        $this->addServerHostKey(new ServerHostKey('ed25519', baseDir: $hostKeyPath));
-        $this->addServerHostKey(new ServerHostKey('rsa', baseDir: $hostKeyPath));
+        $this->addServerHostKey(new ServerHostKey('ed25519', baseDir: $hostKeyPath, loop: $this->loop));
+        $this->addServerHostKey(new ServerHostKey('rsa', baseDir: $hostKeyPath, loop: $this->loop));
 
         $this->tcpServer = new TcpServer($uri, $loop, $context);
+        $this->tcpServer->pause();
         $this->tcpServer->on('connection', function (ConnectionInterface $connection): void {
             $connection = (new Connection($connection, $this->loop))
                 ->setBanner($this->banner)
@@ -103,6 +105,7 @@ final class Server extends EventEmitter implements ServerInterface
         });
 
         Util::forwardEvents($this->tcpServer, $this, ['error']);
+        $this->resumeWhenHostKeysReady();
     }
 
     /**
@@ -141,6 +144,28 @@ final class Server extends EventEmitter implements ServerInterface
     {
         $this->hostKeys[$hostKey->getHostKeyAlgorithm()] = $hostKey;
 
+        if ($hostKey->isReady()) {
+            $this->resumeWhenHostKeysReady();
+
+            return $this;
+        }
+
+        ++$this->pendingHostKeys;
+
+        $readyListener = function () use ($hostKey): void {
+            $hostKey->removeAllListeners('error');
+            --$this->pendingHostKeys;
+            $this->resumeWhenHostKeysReady();
+        };
+        $errorListener = function (\Throwable $throwable) use ($hostKey, &$readyListener): void {
+            $hostKey->removeListener('ready', $readyListener);
+            --$this->pendingHostKeys;
+            $this->emit('error', [$throwable]);
+        };
+
+        $hostKey->once('ready', $readyListener);
+        $hostKey->once('error', $errorListener);
+
         return $this;
     }
 
@@ -172,7 +197,7 @@ final class Server extends EventEmitter implements ServerInterface
      */
     public function getAddress(): ?string
     {
-        return $this->tcpServer->getAddress();
+        return $this->getTcpServer()->getAddress();
     }
 
     /**
@@ -213,7 +238,7 @@ final class Server extends EventEmitter implements ServerInterface
      */
     public function pause(): void
     {
-        $this->tcpServer->pause();
+        $this->getTcpServer()->pause();
     }
 
     /**
@@ -237,7 +262,7 @@ final class Server extends EventEmitter implements ServerInterface
      */
     public function resume(): void
     {
-        $this->tcpServer->resume();
+        $this->getTcpServer()->resume();
     }
 
     /**
@@ -249,7 +274,7 @@ final class Server extends EventEmitter implements ServerInterface
      */
     public function close(): void
     {
-        $this->tcpServer->close();
+        $this->getTcpServer()->close();
         $this->removeAllListeners();
     }
 
@@ -263,5 +288,23 @@ final class Server extends EventEmitter implements ServerInterface
         $this->banner = $banner;
 
         return $this;
+    }
+
+    private function resumeWhenHostKeysReady(): void
+    {
+        if ($this->pendingHostKeys > 0) {
+            return;
+        }
+
+        if (null === $this->tcpServer) {
+            return;
+        }
+
+        $this->tcpServer->resume();
+    }
+
+    private function getTcpServer(): ServerInterface
+    {
+        return $this->tcpServer ?? throw new \RuntimeException('TCP server has not been initialized');
     }
 }

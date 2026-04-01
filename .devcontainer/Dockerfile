@@ -9,12 +9,20 @@ RUN mkdir -p /usr/share/keyrings && \
       > /etc/apt/sources.list.d/yarn.list
 
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \
-    apt-get install -y libffi-dev && \
+    apt-get install -y libffi-dev libuv1-dev && \
     docker-php-ext-install pcntl && \
+    pecl install channel://pecl.php.net/uv-0.3.0 && \
+    docker-php-ext-enable uv && \
     apt-get clean -y && rm -rf /var/lib/apt/lists/*
 
 RUN cp /usr/local/etc/php/php.ini-production /usr/local/etc/php/php.ini && \
-    sed -i -e "s/^ *memory_limit.*/memory_limit = 512M/g" /usr/local/etc/php/php.ini
+    sed -i -e "s/^ *memory_limit.*/memory_limit = 512M/g" /usr/local/etc/php/php.ini && \
+    if [ -f /usr/local/etc/php/conf.d/xdebug.ini ]; then \
+        sed -i \
+            -e "s/^xdebug.mode.*/xdebug.mode = off/" \
+            -e "s/^xdebug.start_with_request.*/xdebug.start_with_request = trigger/" \
+            /usr/local/etc/php/conf.d/xdebug.ini; \
+    fi
 
 # [Optional] Uncomment this section to install additional OS packages.
 # RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
