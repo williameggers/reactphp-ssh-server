@@ -513,9 +513,16 @@ final class PacketHandler
                 case 'aes128-ctr':
                 case 'aes192-ctr':
                 case 'aes256-ctr':
-                    $packetLength = 0;
-                    $packet = $this->handleEncryptedPacketAESCTR($data, $packetLength);
-                    $macLength = $this->hash_CtoS?->getLengthInBytes();
+                    $probe = $this->probeEncryptedPacketAESCTR($data);
+                    if (is_null($probe)) {
+                        return [null, 0];
+                    }
+
+                    [$packetLength, $macLength, $bytesUsed] = $probe;
+                    $packet = $this->handleEncryptedPacketAESCTR(substr($data, 0, $bytesUsed), $packetLength, $macLength);
+                    if (false === $packet) {
+                        return [null, 1];
+                    }
 
                     break;
 
@@ -723,6 +730,57 @@ final class PacketHandler
     }
 
     /**
+     * Determines whether a full AES-CTR encrypted packet is available without
+     * advancing the live decryptor state.
+     *
+     * @return null|array{0: int, 1: int, 2: int}
+     */
+    private function probeEncryptedPacketAESCTR(string $data): ?array
+    {
+        $macLength = $this->hash_CtoS?->getLengthInBytes() ?? throw new \RuntimeException('Hash instance not initialized');
+
+        if (strlen($data) < 4) {
+            return null;
+        }
+
+        $probeDecryptor = $this->cloneClientToServerCtrDecryptor();
+        $packetLengthBytes = $probeDecryptor->decrypt(substr($data, 0, 4));
+        $packetLength = (unpack('N', $packetLengthBytes) ?: [])[1] ?? null;
+        if (! is_int($packetLength)) {
+            throw new \RuntimeException('Failure obtaining packet length');
+        }
+
+        $maxPacketSize = 1024 * 1024;
+        if ($packetLength > $maxPacketSize) {
+            throw new \RuntimeException("Protocol error: packet too large ({$packetLength} > {$maxPacketSize}), bad packet received");
+        }
+
+        $bytesUsed = 4 + $packetLength + $macLength;
+        $this->debug(sprintf(
+            'AES-CTR inbound probe: seq=%d buffer=%d packet_length=%d bytes_used=%d mac_length=%d incomplete=%s',
+            $this->packetSeq_CtoS,
+            strlen($data),
+            $packetLength,
+            $bytesUsed,
+            $macLength,
+            strlen($data) < $bytesUsed ? 'yes' : 'no'
+        ));
+
+        if (strlen($data) < $bytesUsed) {
+            return null;
+        }
+
+        return [$packetLength, $macLength, $bytesUsed];
+    }
+
+    private function cloneClientToServerCtrDecryptor(): AES
+    {
+        $decryptor = $this->decryptor ?? throw new \RuntimeException('Decryptor not initialized');
+
+        return clone $decryptor;
+    }
+
+    /**
      * Constructs and encrypts an SSH packet using AES in CTR mode.
      *
      * This method handles padding, packet length encoding, HMAC computation, and encryption
@@ -857,57 +915,41 @@ final class PacketHandler
      * instance. The packet length is passed by reference so the caller can determine
      * how many bytes were consumed from the buffer.
      *
-     * @param string $data          The raw encrypted data from the input buffer
-     * @param int    &$packetLength Reference to capture the decrypted packet length
+     * @param string $data         The raw encrypted data from the input buffer
+     * @param int    $packetLength The decrypted packet length
+     * @param int    $macLength    The HMAC length in bytes
      *
      * @return false|Packet The parsed Packet on success, or false on failure
      */
-    private function handleEncryptedPacketAESCTR(string $data, int &$packetLength): false|Packet
+    private function handleEncryptedPacketAESCTR(string $data, int $packetLength, int $macLength): false|Packet
     {
-        // Decrypt AES-CTR
         try {
-            $resolvedPacketLength = false;
-            $blockLength = $this->decryptor?->getBlockLengthInBytes() ?? throw new \RuntimeException('Decryptor not initialized');
-            $finalBlock = (int) strlen($data) / $blockLength;
-            $currentBlock = 0;
-            $plaintext = '';
-            do {
-                $plaintext .= $this->decryptor->decrypt(substr($data, $currentBlock * $blockLength, $blockLength));
-                if (! $resolvedPacketLength) {
-                    ++$currentBlock;
-                    $plaintext .= $this->decryptor->decrypt(substr($data, $currentBlock * $blockLength, $blockLength));
+            $ciphertextLength = 4 + $packetLength;
+            $ciphertext = substr($data, 0, $ciphertextLength);
+            $plaintext = $this->decryptor?->decrypt($ciphertext) ?? throw new \RuntimeException('Failure decrypting packet');
 
-                    $tmpPacketLength = (unpack('N', substr($plaintext, 0, 4)) ?: [])[1] ?? null;
-                    if (! is_int($tmpPacketLength)) {
-                        throw new \RuntimeException('Failure obtaining packet length');
-                    }
-                    $packetLength = $tmpPacketLength;
-
-                    $finalBlock = (($packetLength + 4) / $blockLength) - $currentBlock;
-                    $resolvedPacketLength = true;
-                }
-
-                ++$currentBlock;
-            } while ($currentBlock <= $finalBlock);
-
-            $maxPacketSize = 1024 * 1024;
-            if ($packetLength > $maxPacketSize) {
-                throw new \RuntimeException("Protocol error: packet too large ({$packetLength} > {$maxPacketSize}), bad packet received");
+            $mac = substr($data, $ciphertextLength, $macLength);
+            if (strlen($mac) !== $macLength) {
+                throw new \RuntimeException('Incomplete HMAC data');
             }
 
-            $payload = substr($plaintext, 0, 4 + $packetLength);
-            $mac = substr($data, 4 + $packetLength, $this->hash_CtoS?->getLengthInBytes());
-
-            $macData = $this->packInteger($this->packetSeq_CtoS) . $payload;
+            $macData = $this->packInteger($this->packetSeq_CtoS) . $plaintext;
             $calculatedMac = $this->hash_CtoS?->hash($macData) ?? throw new \RuntimeException('Failure generating hash');
+            $calculatedMac = substr($calculatedMac, 0, $macLength);
 
             // Validate HMAC
             if (! hash_equals($calculatedMac, $mac)) {
                 throw new \RuntimeException('Invalid HMAC');
             }
-        } catch (\Exception $e) {
+
+            $paddingLength = ord($plaintext[4]);
+            $payloadLength = $packetLength - $paddingLength - 1;
+            if ($payloadLength < 1) {
+                throw new \RuntimeException('Invalid padding length');
+            }
+        } catch (\Throwable $e) {
             $this->error(sprintf(
-                'Decryption failed for packet seq %d\nError: %s',
+                'AES-CTR packet failed for packet seq %d: %s',
                 $this->packetSeq_CtoS,
                 $e->getMessage()
             ));
@@ -921,9 +963,7 @@ final class PacketHandler
 
         ++$this->packetSeq_CtoS;
 
-        $paddingLength = ord($plaintext[4]);
-
-        return new Packet(substr($plaintext, 5, -$paddingLength));
+        return new Packet(substr($plaintext, 5, $payloadLength));
     }
 
     /**

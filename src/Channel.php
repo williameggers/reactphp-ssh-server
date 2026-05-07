@@ -42,6 +42,8 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     use EventEmitterTrait;
     use WritesLogs;
 
+    private const MAX_BUFFERED_INBOUND_BYTES = 1048576;
+
     private ?TerminalInfo $terminalInfo = null;
     private DuplexStreamInterface $senderChannelStream;
 
@@ -53,15 +55,28 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     private bool $requestReplyPending = false;
     private bool $queueEofAfterReply = false;
     private bool $queueCloseAfterReply = false;
+    private bool $paused = false;
+
+    /**
+     * @var list<string>
+     */
+    private array $pendingInboundChunks = [];
+    private int $pendingInboundBytes = 0;
 
     private array $env = [];
+
+    /**
+     * @var list<string>
+     */
+    private array $pendingOutboundChunks = [];
+    private int $pendingOutboundBytes = 0;
 
     public function __construct(
         private readonly Connection $connection,
         private readonly int $recipientChannel, // Their channel ID
         private readonly int $senderChannel, // Our channel ID
-        private readonly int $windowSize,
-        private readonly int $maxPacketSize,
+        private int $windowSize,
+        private int $maxPacketSize,
         private readonly string $channelType // "session", "x11", etc.
     ) {
         $this->logger = new NullLogger();
@@ -136,6 +151,29 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
         return $this->windowSize;
     }
 
+    public function increaseRemoteWindow(int $bytes): void
+    {
+        if ($bytes <= 0) {
+            return;
+        }
+
+        $newWindowSize = $this->windowSize + $bytes;
+        if ($newWindowSize < 0) {
+            throw new \OverflowException('Remote channel window overflowed');
+        }
+
+        $this->windowSize = $newWindowSize;
+    }
+
+    public function consumeRemoteWindow(int $bytes): void
+    {
+        if ($bytes <= 0) {
+            return;
+        }
+
+        $this->windowSize = max(0, $this->windowSize - $bytes);
+    }
+
     /**
      * Get the maximum packet size allowed for this channel.
      *
@@ -147,6 +185,51 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     public function getMaxPacketSize(): int
     {
         return $this->maxPacketSize;
+    }
+
+    public function queueOutboundData(string $data): void
+    {
+        if ('' === $data) {
+            return;
+        }
+
+        $this->pendingOutboundChunks[] = $data;
+        $this->pendingOutboundBytes += strlen($data);
+    }
+
+    public function hasPendingOutboundData(): bool
+    {
+        return [] !== $this->pendingOutboundChunks;
+    }
+
+    public function shiftPendingOutboundChunk(): ?string
+    {
+        $chunk = array_shift($this->pendingOutboundChunks);
+        if (! is_string($chunk)) {
+            return null;
+        }
+
+        $this->pendingOutboundBytes -= strlen($chunk);
+        if ($this->pendingOutboundBytes < 0) {
+            $this->pendingOutboundBytes = 0;
+        }
+
+        return $chunk;
+    }
+
+    public function prependPendingOutboundChunk(string $data): void
+    {
+        if ('' === $data) {
+            return;
+        }
+
+        array_unshift($this->pendingOutboundChunks, $data);
+        $this->pendingOutboundBytes += strlen($data);
+    }
+
+    public function getPendingOutboundByteCount(): int
+    {
+        return $this->pendingOutboundBytes;
     }
 
     /**
@@ -176,10 +259,9 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
      */
     public function markInputClosed(): void
     {
-        $this->inputClosed = true;
-
         // Send EOF to the process
-        $this->senderChannelStream->write("\x04"); // Ctrl+D (EOF)
+        $this->writeToServer("\x04"); // Ctrl+D (EOF)
+        $this->inputClosed = true;
     }
 
     public function isReadable(): bool
@@ -194,12 +276,28 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
     public function pause(): void
     {
-        $this->senderChannelStream->pause();
+        if ($this->paused) {
+            return;
+        }
+
+        $this->paused = true;
+        $this->debug("Paused channel input for {$this->recipientChannel}");
     }
 
     public function resume(): void
     {
-        $this->senderChannelStream->resume();
+        if (! $this->paused) {
+            return;
+        }
+
+        $this->paused = false;
+        $this->debug(sprintf(
+            'Resuming channel input for %d with %d queued bytes across %d chunks',
+            $this->recipientChannel,
+            $this->pendingInboundBytes,
+            count($this->pendingInboundChunks)
+        ));
+        $this->flushPendingInboundChunks();
     }
 
     public function pipe(WritableStreamInterface $dest, array $options = []): WritableStreamInterface
@@ -289,6 +387,11 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     {
         $this->inputClosed = true;
         $this->outputClosed = true;
+        $this->paused = false;
+        $this->pendingInboundChunks = [];
+        $this->pendingInboundBytes = 0;
+        $this->pendingOutboundChunks = [];
+        $this->pendingOutboundBytes = 0;
         $this->senderChannelStream->close();
         $this->removeAllListeners();
     }
@@ -320,11 +423,43 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
      */
     public function writeToServer(string $data): bool
     {
-        if (! $this->inputClosed) {
-            return $this->senderChannelStream->write($data);
+        if ($this->inputClosed) {
+            return false;
         }
 
-        return false;
+        if ($this->paused) {
+            $this->pendingInboundChunks[] = $data;
+            $this->pendingInboundBytes += strlen($data);
+
+            if ($this->pendingInboundBytes > self::MAX_BUFFERED_INBOUND_BYTES) {
+                $this->warning(sprintf(
+                    'Channel %d inbound buffer exceeded soft cap: %d bytes queued',
+                    $this->recipientChannel,
+                    $this->pendingInboundBytes
+                ));
+            } else {
+                $this->debug(sprintf(
+                    'Queued %d inbound bytes for paused channel %d (%d bytes pending)',
+                    strlen($data),
+                    $this->recipientChannel,
+                    $this->pendingInboundBytes
+                ));
+            }
+
+            return false;
+        }
+
+        return $this->senderChannelStream->write($data);
+    }
+
+    public function isInputPaused(): bool
+    {
+        return $this->paused;
+    }
+
+    public function getPendingInboundByteCount(): int
+    {
+        return $this->pendingInboundBytes;
     }
 
     public function end(mixed $data = null): void
@@ -395,10 +530,33 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
             $locale = $this->getEnvironmentVariable($var);
             if (is_string($locale) && preg_match('/\.(\S+)/', (string) $locale, $matches)) {
                 // Normalize and return the encoding part (e.g., UTF-8, CP437)
-                return mb_strtolower(mb_trim($matches[1]));
+                return mb_strtolower(trim($matches[1]));
             }
         }
 
         return 'utf-8';
+    }
+
+    private function flushPendingInboundChunks(): void
+    {
+        while (! $this->paused && [] !== $this->pendingInboundChunks) {
+            $chunk = array_shift($this->pendingInboundChunks);
+            if (! is_string($chunk)) {
+                continue;
+            }
+
+            $this->pendingInboundBytes -= strlen($chunk);
+            if ($this->pendingInboundBytes < 0) {
+                $this->pendingInboundBytes = 0;
+            }
+
+            if (! $this->senderChannelStream->write($chunk)) {
+                $this->paused = true;
+                array_unshift($this->pendingInboundChunks, $chunk);
+                $this->pendingInboundBytes += strlen($chunk);
+
+                return;
+            }
+        }
     }
 }

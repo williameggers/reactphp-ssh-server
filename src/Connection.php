@@ -99,6 +99,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private int $maxPacketSize = 1024 * 1024; // This gets updated when the client opens a channel
     private int $authenticationFailureCount = 0;
     private float $deferredEventPromiseTimeout = 10.0; // The deferred event promises must resolve within the configured timeout period
+    private bool $transportBackpressured = false;
 
     public function __construct(private ConnectionInterface $connection, private LoopInterface $loop)
     {
@@ -109,6 +110,10 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         $this->setLogger(new Loggers\NullLogger());
 
         Util::forwardEvents($this->connection, $this, ['close', 'error']);
+        $this->connection->on('drain', function (): void {
+            $this->transportBackpressured = false;
+            $this->flushPendingChannelData();
+        });
     }
 
     /**
@@ -324,22 +329,23 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     public function writeChannelData(Channel $channel, string $data): int
     {
-        $maxChunkSize = $channel->getMaxPacketSize() - 1024; // Leave room for packet overhead
-
-        // Split data into chunks if it exceeds max packet size
-        $offset = 0;
-        $totalLength = strlen($data);
-
-        while ($offset < $totalLength) {
-            $chunk = substr($data, $offset, $maxChunkSize);
-            $chunkLength = strlen($chunk);
-
-            $this->writePacked(MessageType::CHANNEL_DATA, [$channel->getRecipientChannel(), $chunk]);
-
-            $offset += $chunkLength;
+        if ('' === $data || $channel->hasSentClose() || $channel->hasReceivedClose()) {
+            return 0;
         }
 
-        return $totalLength;
+        if ($this->transportBackpressured || $channel->hasPendingOutboundData()) {
+            $channel->queueOutboundData($data);
+            $this->flushPendingChannelData();
+
+            return strlen($data);
+        }
+
+        $acceptedBytes = $this->writeChannelDataChunks($channel, $data);
+        if ($acceptedBytes < strlen($data)) {
+            $channel->queueOutboundData(substr($data, $acceptedBytes));
+        }
+
+        return strlen($data);
     }
 
     /**
@@ -1076,8 +1082,19 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             $data = preg_replace('/\r(?!\n)/', "\n", (string) $data);
         }
 
-        // Forward the data to the server from the client
-        $channel->writeToServer((string) $data);
+        // Forward the data to the server from the client.
+        // A false result means the channel is currently buffering paused input.
+        $delivered = $channel->writeToServer((string) $data);
+        if (! $delivered) {
+            $this->debug(sprintf(
+                'Channel %d backpressure active for %d inbound bytes',
+                $recipientChannel,
+                strlen((string) $data)
+            ));
+
+            return;
+        }
+
         $this->emit('channel.data', [$recipientChannel, $data]);
     }
 
@@ -1201,9 +1218,10 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
             try {
                 $cipher = $this->kexNegotiator?->getNegotiatedAlgorithm('encryption_ctos') ?? '';
+                $macAlgorithm = $this->kexNegotiator?->getNegotiatedAlgorithm('mac_ctos');
                 $macLength = match ($cipher) {
                     'aes256-gcm@openssh.com', 'aes128-gcm@openssh.com' => 16,
-                    'aes128-ctr', 'aes192-ctr', 'aes256-ctr' => match ($this->kexNegotiator?->getNegotiatedAlgorithm('mac_ctos')) {
+                    'aes128-ctr', 'aes192-ctr', 'aes256-ctr' => match ($macAlgorithm) {
                         'hmac-sha2-512' => 64,
                         'hmac-sha2-256' => 32,
                         'hmac-sha1' => 20,
@@ -1361,6 +1379,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             MessageType::USERAUTH_INFO_RESPONSE => $this->handleUserAuthInfoResponse($packet),
             MessageType::CHANNEL_OPEN => $this->handleChannelOpen($packet), // 'I want to open a channel'
             MessageType::CHANNEL_REQUEST => $this->handleChannelRequest($packet), // 'Lets use this channel for [shell, exec, subsystem, x11, forward, auth-agent, etc..]'
+            MessageType::CHANNEL_WINDOW_ADJUST => $this->handleChannelWindowAdjust($packet),
             MessageType::CHANNEL_DATA => $this->handleChannelData($packet), // 'I'm sending you some data' (key press in our case usually)
             MessageType::CHANNEL_EOF => $this->handleChannelEof($packet),
             MessageType::CHANNEL_CLOSE => $this->handleChannelClose($packet),
@@ -1419,7 +1438,90 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             return false;
         }
 
-        return mb_strlen($packet);
+        return strlen($packet);
+    }
+
+    private function handleChannelWindowAdjust(Packet $packet): void
+    {
+        [$channelId, $bytesToAdd] = $packet->extractFormat('%u%u');
+
+        if (! isset($this->activeChannels[$channelId])) {
+            $this->debug("Ignoring window adjust for unknown channel {$channelId}");
+
+            return;
+        }
+
+        if ($bytesToAdd <= 0) {
+            $this->debug("Ignoring non-positive window adjust for channel {$channelId}");
+
+            return;
+        }
+
+        $channel = $this->activeChannels[$channelId];
+        $channel->increaseRemoteWindow((int) $bytesToAdd);
+        $this->flushPendingChannelData($channel);
+    }
+
+    private function flushPendingChannelData(?Channel $priorityChannel = null): void
+    {
+        $channels = null === $priorityChannel
+            ? array_values($this->activeChannels)
+            : array_merge([$priorityChannel], array_values(array_filter(
+                $this->activeChannels,
+                static fn (Channel $channel): bool => $channel !== $priorityChannel
+            )));
+
+        foreach ($channels as $channel) {
+            while ($channel->hasPendingOutboundData() && $channel->getWindowSize() > 0 && $this->connection->isWritable() && ! $this->transportBackpressured) {
+                $chunk = $channel->shiftPendingOutboundChunk();
+                if (! is_string($chunk)) {
+                    break;
+                }
+
+                $writtenBytes = $this->writeChannelDataChunks($channel, $chunk);
+                if ($writtenBytes < strlen($chunk)) {
+                    $channel->prependPendingOutboundChunk(substr($chunk, $writtenBytes));
+
+                    return;
+                }
+            }
+
+            if ($this->transportBackpressured) {
+                return;
+            }
+        }
+    }
+
+    private function writeChannelDataChunks(Channel $channel, string $data): int
+    {
+        $maxChunkSize = max(1, $channel->getMaxPacketSize() - 1024); // Leave room for packet overhead
+        $offset = 0;
+        $totalLength = strlen($data);
+
+        while ($offset < $totalLength && $channel->getWindowSize() > 0) {
+            $availableWindow = $channel->getWindowSize();
+            $remainingBytes = $totalLength - $offset;
+            $chunkLength = min($remainingBytes, $availableWindow, $maxChunkSize);
+            if ($chunkLength <= 0) {
+                break;
+            }
+
+            $chunk = substr($data, $offset, $chunkLength);
+            $result = $this->writePacked(MessageType::CHANNEL_DATA, [$channel->getRecipientChannel(), $chunk]);
+            if (false === $result) {
+                $channel->consumeRemoteWindow(strlen($chunk));
+                $offset += strlen($chunk);
+                $this->transportBackpressured = true;
+
+                break;
+            }
+
+            $actualChunkLength = strlen($chunk);
+            $channel->consumeRemoteWindow($actualChunkLength);
+            $offset += $actualChunkLength;
+        }
+
+        return $offset;
     }
 
     private function handleDisconnect(Packet $packet): void

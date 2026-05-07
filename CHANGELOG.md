@@ -2,6 +2,14 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.0.5 - 2026-05-07
+
+### Fixed
+
+  * Fixed channel input backpressure so paused channels buffer inbound client data and flush it in order when resumed, instead of emitting data immediately while the channel is paused.
+  * Fixed outbound channel flow control to respect SSH remote window updates and underlying transport backpressure, queuing unsent channel data correctly and avoiding duplicate re-queueing of bytes already accepted by the transport.
+  * Fixed AES-CTR packet parsing to handle partial packets safely, including packets split across ciphertext and MAC boundaries, without desynchronizing decryptor state.
+
 ## 1.0.4 - 2026-04-01
 
 ### Fixed
