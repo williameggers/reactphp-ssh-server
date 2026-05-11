@@ -2,6 +2,28 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## 1.1.0 - 2026-05-11
+
+### Added
+
+  * Added opt-in SSH TCP forwarding support, including local forwarding via `direct-tcpip` and remote forwarding via `tcpip-forward`, `cancel-tcpip-forward`, and server-initiated `forwarded-tcpip` channels.
+  * Added server-level forwarding controls and connection events for approving `direct-tcpip` requests, approving and cancelling remote forwards, and observing accepted `forwarded-tcpip` connections.
+  * Added local and remote forwarding examples, expanded example documentation, and comprehensive forwarding regression tests.
+
+### Fixed
+
+  * Fixed an authentication bypass that previously allowed unauthenticated clients to send connection-protocol messages such as `CHANNEL_OPEN`, `CHANNEL_REQUEST`, and `GLOBAL_REQUEST` before authentication completed.
+  * Fixed paused channel inbound buffering to enforce warning and disconnect thresholds, preventing unbounded memory growth while still allowing bounded buffering during backpressure.
+  * Fixed outbound channel buffering to enforce warning and close thresholds, closing only the affected channel when queued outbound data exceeds the configured limit.
+  * Fixed pending `forwarded-tcpip` sockets so unconfirmed forwarded connections are cleaned up after a timeout instead of remaining pending indefinitely.
+  * Fixed inbound channel-type validation so non-`session` channel policy is enforced during `CHANNEL_OPEN`, with `direct-tcpip` and unknown channel types rejected with the correct failure reasons.
+  * Fixed shell and exec request startup behavior so channel output is sent immediately when no reply is required, while preserving queued output until the reply is resolved when a reply is expected.
+
+### Changed
+
+  * Updated channel bookkeeping to use distinct server-local channel IDs, improving correctness for server-initiated forwarding channels and channel close and EOF routing.
+  * Updated the README and examples to document forwarding support, new events, and supported versus unsupported forwarding modes.
+
 ## 1.0.5 - 2026-05-07
 
 ### Fixed

@@ -16,6 +16,8 @@ This project is an event-driven, standalone SSH server implementation for [React
 
 * Customizable authentication and session behavior via intuitive callback handlers
 
+* Supports SSH TCP forwarding when explicitly enabled: local forwarding via `direct-tcpip` and remote forwarding via `tcpip-forward`, `cancel-tcpip-forward`, and server-initiated `forwarded-tcpip` channels
+
 * Supports widely-used encryption modes such as Galois/Counter Mode (GCM) and Counter Mode (CTR), along with modern host key algorithms including ssh-ed25519.
 
 * Designed for testing, development, and internal tooling - **not security-hardened for exposure on public networks**. See [disclaimer](#disclaimer).
@@ -36,6 +38,7 @@ This project is an event-driven, standalone SSH server implementation for [React
 * [Connection usage](#connection-usage)
   * [Connection class](#connection-class)
     * [Events](#connection-events)
+    * [Remote forwarding example](#remote-forwarding-example)
     * [Methods](#connection-methods)
   * [Channel class](#channel-class)
     * [Events](#channel-events)
@@ -92,6 +95,8 @@ $server->on('connection', function (Connection $connection) {
      */
     $connection->on('channel.open', function (Channel $channel) {
         $channel->on('shell-request', function (Deferred $started) use ($channel) {
+            $started->resolve(true);
+
             $channel->write("Hello " . $channel->getConnection()->getRemoteAddress() . "!\r\n");
             $channel->write("Welcome to this amazing SSH server!\r\n");
             $channel->write("Here's a tip: don't say anything.\r\n");
@@ -99,8 +104,6 @@ $server->on('connection', function (Connection $connection) {
             $channel->on('data', function ($data) use ($channel) {
                 $channel->getConnection()->close();
             });
-
-            $started->resolve(true);
         });
     });
 });
@@ -195,6 +198,22 @@ $server->on('connection', function (Connection $connection) {
 * **disableAuthentication(): self**
 
     Disables user authentication. When disabled, all connections are considered authenticated automatically, and the authenticate event will not be emitted. This is useful for development or internal services, or services that provide an alternate authentication approach. Returns the server instance for chaining.
+
+* **enableRemoteForwarding(): self**
+
+    Enables remote TCP forwarding support for new SSH connections. Remote forwarding is disabled by default. Even when enabled, each `tcpip-forward` request must still be explicitly approved by handling the `global-request.tcpip-forward` event.
+
+* **enableDirectTcpip(): self**
+
+    Enables direct TCP/IP forwarding support for new SSH connections. Direct TCP/IP forwarding is disabled by default. Even when enabled, each `direct-tcpip` channel open request must still be explicitly approved by handling the `direct-tcpip` event.
+
+* **disableDirectTcpip(): self**
+
+    Disables direct TCP/IP forwarding support for new SSH connections.
+
+* **disableRemoteForwarding(): self**
+
+    Disables remote TCP forwarding support for new SSH connections.
 
 * **addServerHostKey(ServerHostKey $hostKey): self**
 
@@ -347,9 +366,98 @@ $connection->close();
 
     **Signature:** `function (int $channelId, string $data): void`
 
+* **global-request.tcpip-forward** - emitted when the client requests remote TCP forwarding with `tcpip-forward`.
+
+    This event is only emitted when remote forwarding has been explicitly enabled. Resolve the provided `Deferred` with `true` to allow the bind or `false` to reject it. If no listener is registered, the request is rejected.
+
+    **Signature:** `function (string $bindAddress, int $bindPort, Deferred $allowed): void`
+
+* **global-request.cancel-tcpip-forward** - emitted when the client requests cancellation of a remote TCP forward.
+
+    **Signature:** `function (string $bindAddress, int $bindPort): void`
+
+* **forwarded-tcpip.connection** - emitted when the server-side forwarded listener accepts a TCP connection and is about to open a `forwarded-tcpip` channel back to the SSH client.
+
+    **Signature:** `function (array $info, React\Socket\ConnectionInterface $socket): void`
+
+* **direct-tcpip** - emitted when the client requests local TCP forwarding via a `direct-tcpip` channel open.
+
+    This event is only emitted when direct TCP/IP forwarding has been explicitly enabled. Resolve the provided `Deferred` with `true` to allow the outbound TCP connection attempt or `false` to reject it. If no listener is registered, the request is rejected.
+
+    **Signature:** `function (array $info, Deferred $allowed): void`
+
 * **close** - emitted when the connection is terminated.
 
     **Signature:** `function (): void`
+
+<h4 id="remote-forwarding-example">Remote Forwarding Example</h4>
+
+Remote forwarding lets an SSH client ask the server to listen on a TCP address and tunnel accepted connections back to the client over `forwarded-tcpip` channels.
+
+```php
+use React\Promise\Deferred;
+use WilliamEggers\React\SSH\Connection;
+use WilliamEggers\React\SSH\Server;
+
+$server = new Server('127.0.0.1:2222');
+$server->enableRemoteForwarding();
+
+$server->on('connection', function (Connection $connection): void {
+    $connection->on('global-request.tcpip-forward', function (string $bindAddress, int $bindPort, Deferred $allowed): void {
+        // Explicitly approve each requested bind.
+        $allowed->resolve('127.0.0.1' === $bindAddress);
+    });
+
+    $connection->on('forwarded-tcpip.connection', function (array $info): void {
+        printf(
+            "Forwarded TCP connection: bind=%s:%d origin=%s:%d\n",
+            $info['bindAddress'],
+            $info['bindPort'],
+            $info['originatorAddress'],
+            $info['originatorPort']
+        );
+    });
+});
+```
+
+Notes:
+
+* Remote forwarding is disabled by default and must be enabled explicitly with `enableRemoteForwarding()`.
+* Each `tcpip-forward` request must be explicitly approved by a `global-request.tcpip-forward` handler.
+* Valid requests receive `SSH_MSG_REQUEST_SUCCESS`; invalid, unapproved, or rejected requests receive `SSH_MSG_REQUEST_FAILURE` without disconnecting the SSH session.
+* Requests for port `0` are supported. The success reply includes the allocated port.
+* The current implementation accepts literal IPv4 and IPv6 addresses plus common wildcard forms such as `0.0.0.0`, `::`, and `localhost`.
+* Remote forwarding support covers SSH remote forwarding only. Dynamic forwarding remains unsupported.
+
+<h4 id="local-forwarding-example">Local Forwarding Example</h4>
+
+Local forwarding lets an SSH client ask the server to open an outbound TCP connection from the server to a requested destination over a `direct-tcpip` channel.
+
+```php
+use React\Promise\Deferred;
+use WilliamEggers\React\SSH\Connection;
+use WilliamEggers\React\SSH\Server;
+
+$server = new Server('127.0.0.1:2222');
+$server->enableDirectTcpip();
+
+$server->on('connection', function (Connection $connection): void {
+    $connection->on('direct-tcpip', function (array $info, Deferred $allowed): void {
+        $approved = $info['destinationAddress'] === '127.0.0.1'
+            && in_array($info['destinationPort'], [80, 443, 3000], true);
+
+        $allowed->resolve($approved);
+    });
+});
+```
+
+Notes:
+
+* Direct TCP/IP forwarding is disabled by default and must be enabled explicitly with `enableDirectTcpip()`.
+* Each `direct-tcpip` request must be explicitly approved by a `direct-tcpip` handler.
+* Rejected or unapproved requests receive `SSH_MSG_CHANNEL_OPEN_FAILURE` with `ADMINISTRATIVELY_PROHIBITED`.
+* Outbound socket connection failures receive `SSH_MSG_CHANNEL_OPEN_FAILURE` with `CONNECT_FAILED`.
+* Direct TCP/IP forwarding covers SSH local forwarding (`ssh -L`). Dynamic forwarding (`ssh -D`) remains unsupported.
 
 <h4 id="connection-methods">Connection Methods</h4>
 
@@ -465,6 +573,8 @@ In addition to channel-specific methods, the `Channel` class implements the [`Ev
     > **Important**
     >
     > The deferred promise must be resolved within `Connection->deferredEventPromiseTimeout` seconds or ***CHANNEL_FAILURE*** will be sent.
+    >
+    > **Data queuing:** When the client expects a reply (typical for exec requests), data written to the channel before resolving the `$started` Deferred will be queued and sent only after the promise resolves. To send data immediately, resolve the Deferred as early as possible.
 
     **Signature:** `function (string $command, Deferred $started): void`
 
@@ -482,6 +592,8 @@ In addition to channel-specific methods, the `Channel` class implements the [`Ev
     > **Important**
     >
     > The deferred promise must be resolved within `Connection->deferredEventPromiseTimeout` seconds or ***CHANNEL_FAILURE*** will be sent.
+    >
+    > **Data queuing:** When the client expects a reply (typical for interactive shells), data written to the channel before resolving the `$started` Deferred will be queued and sent only after the promise resolves. To send data immediately, resolve the Deferred as early as possible.
 
     **Signature:** `function (Deferred $started): void`
 
@@ -548,6 +660,8 @@ This is often used to interrupt a long-running command or to cancel a session gr
 
     Sends a string of data back to the client over the channel using SSH_MSG_CHANNEL_DATA. This is the primary method for server-side output in shell sessions, exec commands, or other interactive flows.
 
+    > **Note:** When the channel is in a pending request state (e.g., before the shell-request or exec-request Deferred is resolved), written data may be queued until the request completes.
+
 * **end($data = null)**
 
     Optionally sends final data, then ends this SSH channel by sending `SSH_MSG_CHANNEL_EOF` followed by `SSH_MSG_CHANNEL_CLOSE`. This affects only the channel, not the underlying SSH connection.
@@ -612,7 +726,7 @@ This SSH server implementation is intentionally scoped to support core SSH proto
 
 * `ssh-copy-id` **capability** - This server does not support automatically installing public keys via the ssh-copy-id tool. Public key management must be handled externally.
 
-* **Port forwarding (local, remote, dynamic)** - SSH port forwarding features (e.g., -L, -R, or -D flags) are not supported. This includes tunneling TCP connections through the SSH transport.
+* **Dynamic forwarding** - Dynamic (`-D`) forwarding is not supported. Local (`-L`) forwarding via `direct-tcpip` and remote (`-R`) forwarding via `tcpip-forward` / `cancel-tcpip-forward` are supported only when explicitly enabled and approved per request.
 
 * **Proxy functionality** - Acting as an SSH proxy or jump host is not supported, and this server will not relay SSH traffic between clients or other SSH servers.
 

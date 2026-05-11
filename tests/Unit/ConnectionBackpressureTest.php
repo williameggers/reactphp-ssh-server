@@ -83,6 +83,21 @@ test('handleChannelData only emits connection channel.data when delivery is imme
     expect($events)->toBe([[1, 'xyz']]);
 });
 
+test('handleChannelData disconnects when paused inbound buffering exceeds the disconnect threshold', function (): void {
+    [$connection, $channel, $transport] = connectionWithChannelForTests();
+
+    $channel->pause();
+    invokeHandleChannelData($connection, channelDataPacket(1, str_repeat('a', 10485760)));
+
+    expect($channel->getPendingInboundByteCount())->toBe(10485760);
+
+    invokeHandleChannelData($connection, channelDataPacket(1, 'b'));
+
+    expect($transport->isWritable())->toBeFalse();
+    expect($transport->getWrites())->toHaveCount(1);
+    expect(Packet::fromData($transport->getWrites()[0])->type)->toBe(MessageType::DISCONNECT);
+});
+
 test('writeChannelData queues remainder when remote window is exhausted', function (): void {
     [$connection, $channel, $transport] = connectionWithChannelForTests();
 
@@ -94,6 +109,24 @@ test('writeChannelData queues remainder when remote window is exhausted', functi
     expect($channel->getWindowSize())->toBe(0);
     expect($channel->getPendingOutboundByteCount())->toBe(2);
     expect($transport->getWrites())->toHaveCount(1);
+});
+
+test('writeChannelData closes the channel when outbound buffering exceeds the close threshold', function (): void {
+    [$connection, $channel, $transport] = connectionWithChannelForTests();
+
+    $channel->consumeRemoteWindow(65535);
+
+    expect($connection->writeChannelData($channel, str_repeat('a', 10485760)))->toBe(10485760);
+    expect($channel->getPendingOutboundByteCount())->toBe(10485760);
+
+    expect($connection->writeChannelData($channel, 'b'))->toBe(0);
+    expect($channel->getPendingOutboundByteCount())->toBe(10485760);
+    expect($channel->hasSentClose())->toBeTrue();
+    expect($transport->isWritable())->toBeTrue();
+
+    $writes = $transport->getWrites();
+    expect($writes)->toHaveCount(1);
+    expect(Packet::fromData($writes[0])->type)->toBe(MessageType::CHANNEL_CLOSE);
 });
 
 test('channel window adjust flushes queued outbound data', function (): void {
@@ -154,6 +187,36 @@ test('transport drain flushes channel data queued after backpressure', function 
     expect($transport->getWrites())->toHaveCount(2);
 });
 
+test('shell request without reply does not buffer startup output behind deferred resolution', function (): void {
+    [$connection, $channel, $transport] = connectionWithChannelForTests();
+
+    $channel->on('shell-request', static function ($started) use ($channel): void {
+        $channel->write('ansi-probe');
+    });
+
+    invokeHandleChannelRequest($connection, channelRequestPacket(1, 'shell', false));
+
+    expect($channel->hasPendingRequestReply())->toBeFalse();
+    expect($channel->getPendingOutboundByteCount())->toBe(0);
+    expect($transport->getWrites())->toHaveCount(1);
+    expect(Packet::fromData($transport->getWrites()[0])->type)->toBe(MessageType::CHANNEL_DATA);
+});
+
+test('exec request without reply does not buffer startup output behind deferred resolution', function (): void {
+    [$connection, $channel, $transport] = connectionWithChannelForTests();
+
+    $channel->on('exec-request', static function (string $command, $started) use ($channel): void {
+        $channel->write('exec-output');
+    });
+
+    invokeHandleChannelRequest($connection, channelRequestPacket(1, 'exec', false, ['whoami']));
+
+    expect($channel->hasPendingRequestReply())->toBeFalse();
+    expect($channel->getPendingOutboundByteCount())->toBe(0);
+    expect($transport->getWrites())->toHaveCount(1);
+    expect(Packet::fromData($transport->getWrites()[0])->type)->toBe(MessageType::CHANNEL_DATA);
+});
+
 function connectionWithChannelForTests(): array
 {
     $transport = new InMemoryConnection();
@@ -161,8 +224,8 @@ function connectionWithChannelForTests(): array
     $connection->setConnectionId(1);
     $channel = new Channel($connection, 1, 1, 65535, 32768, 'session');
 
-    $property = new ReflectionProperty($connection, 'activeChannels');
-    $property->setValue($connection, [1 => $channel]);
+    $localChannels = new ReflectionProperty($connection, 'activeChannelsByLocalId');
+    $localChannels->setValue($connection, [1 => $channel]);
 
     return [$connection, $channel, $transport];
 }
@@ -179,6 +242,13 @@ function channelWindowAdjustPacket(int $channelId, int $bytesToAdd): Packet
     return new Packet($packetHandler->packValues(MessageType::CHANNEL_WINDOW_ADJUST, [$channelId, $bytesToAdd]));
 }
 
+function channelRequestPacket(int $channelId, string $requestType, bool $wantReply, array $payload = []): Packet
+{
+    $packetHandler = new PacketHandler(new InMemoryConnection());
+
+    return new Packet($packetHandler->packValues(MessageType::CHANNEL_REQUEST, [$channelId, $requestType, $wantReply, ...$payload]));
+}
+
 function invokeHandleChannelData(Connection $connection, Packet $packet): void
 {
     $method = new ReflectionMethod($connection, 'handleChannelData');
@@ -188,5 +258,11 @@ function invokeHandleChannelData(Connection $connection, Packet $packet): void
 function invokeHandleChannelWindowAdjust(Connection $connection, Packet $packet): void
 {
     $method = new ReflectionMethod($connection, 'handleChannelWindowAdjust');
+    $method->invoke($connection, $packet);
+}
+
+function invokeHandleChannelRequest(Connection $connection, Packet $packet): void
+{
+    $method = new ReflectionMethod($connection, 'handleChannelRequest');
     $method->invoke($connection, $packet);
 }

@@ -110,13 +110,30 @@ test('remote window bookkeeping tracks queued outbound data', function (): void 
     expect($channel->hasPendingOutboundData())->toBeFalse();
 });
 
-test('buffer cap behavior is enforced while paused', function (): void {
+test('paused inbound buffering warns after the warning threshold and throws after the disconnect threshold', function (): void {
     $channel = channelForTests();
     $channel->pause();
 
     expect($channel->writeToServer(str_repeat('a', 1048576)))->toBeFalse();
     expect($channel->writeToServer('b'))->toBeFalse();
-    expect($channel->getPendingInboundByteCount())->toBe(1048577);
+    expect($channel->writeToServer(str_repeat('c', 9437183)))->toBeFalse();
+    expect($channel->getPendingInboundByteCount())->toBe(10485760);
+
+    expect(fn () => $channel->writeToServer('d'))->toThrow(OverflowException::class);
+    expect($channel->getPendingInboundByteCount())->toBe(10485760);
+});
+
+test('outbound buffering warns after the warning threshold and throws after the close threshold', function (): void {
+    $channel = channelForTests();
+
+    $channel->queueOutboundData(str_repeat('a', 1048576));
+    $channel->queueOutboundData('b');
+    $channel->queueOutboundData(str_repeat('c', 9437183));
+
+    expect($channel->getPendingOutboundByteCount())->toBe(10485760);
+
+    expect(fn () => $channel->queueOutboundData('d'))->toThrow(OverflowException::class);
+    expect($channel->getPendingOutboundByteCount())->toBe(10485760);
 });
 
 function channelForTests(): Channel

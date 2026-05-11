@@ -24,31 +24,57 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-require __DIR__ . '/../vendor/autoload.php';
+namespace WilliamEggers\Tests\React\SSH\Support;
 
 use React\Promise\Deferred;
-use React\Socket\LimitingServer;
-use WilliamEggers\React\SSH\Channel;
-use WilliamEggers\React\SSH\Connection;
-use WilliamEggers\React\SSH\Server;
+use React\Promise\PromiseInterface;
+use React\Socket\ConnectionInterface;
+use React\Socket\ConnectorInterface;
 
-$limitingServer = new LimitingServer(
-    new Server('127.0.0.1:2222'),
-    1
-);
+final class FakeConnector implements ConnectorInterface
+{
+    /**
+     * @var list<string>
+     */
+    private array $connectTargets = [];
 
-$limitingServer->on('connection', static function (Connection $connection): void {
-    $connection->on('channel.open', static function (Channel $channel): void {
-        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
-            $started->resolve(true);
+    /**
+     * @var list<Deferred<ConnectionInterface>>
+     */
+    private array $deferredConnections = [];
 
-            $channel->write('Hello ' . $channel->getConnection()->getRemoteAddress() . "!\r\n");
-            $channel->write("Welcome to this SSH server that will only accept 1 connection!\r\n");
-            $channel->write("Here's a tip: don't say anything.\r\n");
+    public function connect($uri): PromiseInterface
+    {
+        $this->connectTargets[] = (string) $uri;
 
-            $channel->on('data', static function ($data) use ($channel): void {
-                $channel->getConnection()->close();
-            });
-        });
-    });
-});
+        $deferred = new Deferred();
+        $this->deferredConnections[] = $deferred;
+
+        return $deferred->promise();
+    }
+
+    /**
+     * @return list<string>
+     */
+    public function getConnectTargets(): array
+    {
+        return $this->connectTargets;
+    }
+
+    public function resolveNext(ConnectionInterface $connection): void
+    {
+        $deferred = array_shift($this->deferredConnections) ?? throw new \RuntimeException('No pending connector promise to resolve');
+        $deferred->resolve($connection);
+    }
+
+    public function rejectNext(\Throwable $throwable): void
+    {
+        $deferred = array_shift($this->deferredConnections) ?? throw new \RuntimeException('No pending connector promise to reject');
+        $deferred->reject($throwable);
+    }
+
+    public function pendingCount(): int
+    {
+        return count($this->deferredConnections);
+    }
+}

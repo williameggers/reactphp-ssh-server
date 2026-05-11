@@ -42,7 +42,10 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     use EventEmitterTrait;
     use WritesLogs;
 
-    private const MAX_BUFFERED_INBOUND_BYTES = 1048576;
+    private const INBOUND_BUFFER_WARNING_THRESHOLD_BYTES = 1048576;
+    private const INBOUND_BUFFER_DISCONNECT_THRESHOLD_BYTES = 10485760;
+    private const OUTBOUND_BUFFER_WARNING_THRESHOLD_BYTES = 1048576;
+    private const OUTBOUND_BUFFER_CLOSE_THRESHOLD_BYTES = 10485760;
 
     private ?TerminalInfo $terminalInfo = null;
     private DuplexStreamInterface $senderChannelStream;
@@ -62,6 +65,7 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
      */
     private array $pendingInboundChunks = [];
     private int $pendingInboundBytes = 0;
+    private bool $hasLoggedInboundBufferWarning = false;
 
     private array $env = [];
 
@@ -70,6 +74,7 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
      */
     private array $pendingOutboundChunks = [];
     private int $pendingOutboundBytes = 0;
+    private bool $hasLoggedOutboundBufferWarning = false;
 
     public function __construct(
         private readonly Connection $connection,
@@ -189,12 +194,7 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
     public function queueOutboundData(string $data): void
     {
-        if ('' === $data) {
-            return;
-        }
-
-        $this->pendingOutboundChunks[] = $data;
-        $this->pendingOutboundBytes += strlen($data);
+        $this->queueOutboundChunk($data);
     }
 
     public function hasPendingOutboundData(): bool
@@ -214,17 +214,16 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
             $this->pendingOutboundBytes = 0;
         }
 
+        if ($this->pendingOutboundBytes <= self::OUTBOUND_BUFFER_WARNING_THRESHOLD_BYTES) {
+            $this->hasLoggedOutboundBufferWarning = false;
+        }
+
         return $chunk;
     }
 
     public function prependPendingOutboundChunk(string $data): void
     {
-        if ('' === $data) {
-            return;
-        }
-
-        array_unshift($this->pendingOutboundChunks, $data);
-        $this->pendingOutboundBytes += strlen($data);
+        $this->queueOutboundChunk($data, true);
     }
 
     public function getPendingOutboundByteCount(): int
@@ -261,6 +260,17 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     {
         // Send EOF to the process
         $this->writeToServer("\x04"); // Ctrl+D (EOF)
+        $this->inputClosed = true;
+    }
+
+    /**
+     * Marks the channel input as closed without emitting a local EOF byte.
+     *
+     * This is used for non-terminal channels such as `forwarded-tcpip`, where
+     * the remote EOF should stop reads without injecting terminal control input.
+     */
+    public function markInputClosedSilently(): void
+    {
         $this->inputClosed = true;
     }
 
@@ -390,8 +400,10 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
         $this->paused = false;
         $this->pendingInboundChunks = [];
         $this->pendingInboundBytes = 0;
+        $this->hasLoggedInboundBufferWarning = false;
         $this->pendingOutboundChunks = [];
         $this->pendingOutboundBytes = 0;
+        $this->hasLoggedOutboundBufferWarning = false;
         $this->senderChannelStream->close();
         $this->removeAllListeners();
     }
@@ -428,12 +440,25 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
         }
 
         if ($this->paused) {
-            $this->pendingInboundChunks[] = $data;
-            $this->pendingInboundBytes += strlen($data);
+            $nextBufferedBytes = $this->pendingInboundBytes + strlen($data);
+            if ($nextBufferedBytes > self::INBOUND_BUFFER_DISCONNECT_THRESHOLD_BYTES) {
+                throw new \OverflowException(sprintf(
+                    'Channel %d inbound buffer exceeded disconnect threshold: %d bytes queued',
+                    $this->recipientChannel,
+                    $nextBufferedBytes
+                ));
+            }
 
-            if ($this->pendingInboundBytes > self::MAX_BUFFERED_INBOUND_BYTES) {
+            $this->pendingInboundChunks[] = $data;
+            $this->pendingInboundBytes = $nextBufferedBytes;
+
+            if (
+                ! $this->hasLoggedInboundBufferWarning
+                && $this->pendingInboundBytes > self::INBOUND_BUFFER_WARNING_THRESHOLD_BYTES
+            ) {
+                $this->hasLoggedInboundBufferWarning = true;
                 $this->warning(sprintf(
-                    'Channel %d inbound buffer exceeded soft cap: %d bytes queued',
+                    'Channel %d inbound buffer exceeded warning threshold: %d bytes queued',
                     $this->recipientChannel,
                     $this->pendingInboundBytes
                 ));
@@ -550,6 +575,10 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
                 $this->pendingInboundBytes = 0;
             }
 
+            if ($this->pendingInboundBytes <= self::INBOUND_BUFFER_WARNING_THRESHOLD_BYTES) {
+                $this->hasLoggedInboundBufferWarning = false;
+            }
+
             if (! $this->senderChannelStream->write($chunk)) {
                 $this->paused = true;
                 array_unshift($this->pendingInboundChunks, $chunk);
@@ -557,6 +586,49 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
                 return;
             }
+        }
+    }
+
+    /**
+     * Queues outbound channel data while enforcing warning and close thresholds.
+     *
+     * When buffering crosses the warning threshold, a warning is logged once. If the
+     * queued bytes would exceed the close threshold, an OverflowException is thrown
+     * before the new chunk is added.
+     */
+    private function queueOutboundChunk(string $data, bool $prepend = false): void
+    {
+        if ('' === $data) {
+            return;
+        }
+
+        $nextBufferedBytes = $this->pendingOutboundBytes + strlen($data);
+        if ($nextBufferedBytes > self::OUTBOUND_BUFFER_CLOSE_THRESHOLD_BYTES) {
+            throw new \OverflowException(sprintf(
+                'Channel %d outbound buffer exceeded close threshold: %d bytes queued',
+                $this->recipientChannel,
+                $nextBufferedBytes
+            ));
+        }
+
+        if ($prepend) {
+            array_unshift($this->pendingOutboundChunks, $data);
+        } else {
+            $this->pendingOutboundChunks[] = $data;
+        }
+
+        $this->pendingOutboundBytes = $nextBufferedBytes;
+
+        if (
+            ! $this->hasLoggedOutboundBufferWarning
+            && $this->pendingOutboundBytes > self::OUTBOUND_BUFFER_WARNING_THRESHOLD_BYTES
+        ) {
+            $this->hasLoggedOutboundBufferWarning = true;
+            $this->warning(sprintf(
+                'Channel %d outbound buffer exceeded warning threshold: %d bytes queued',
+                $this->recipientChannel,
+                $this->pendingOutboundBytes
+            ));
         }
     }
 }

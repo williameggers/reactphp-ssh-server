@@ -120,4 +120,9 @@ final class InMemoryConnection implements ConnectionInterface
     {
         return $this->writes;
     }
+
+    public function isPaused(): bool
+    {
+        return $this->paused;
+    }
 }

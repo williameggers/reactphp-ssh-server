@@ -39,9 +39,13 @@ use function React\Promise\Timer\sleep;
 use function React\Promise\Timer\timeout;
 
 use React\Socket\ConnectionInterface;
+use React\Socket\Connector;
+use React\Socket\ConnectorInterface;
+use React\Socket\TcpServer;
 use React\Stream\Util;
 use React\Stream\WritableStreamInterface;
 use WilliamEggers\React\SSH\Concerns\WritesLogs;
+use WilliamEggers\React\SSH\Enums\ChannelOpenFailureReason;
 use WilliamEggers\React\SSH\Enums\DisconnectReason;
 use WilliamEggers\React\SSH\Enums\MessageType;
 use WilliamEggers\React\SSH\Enums\TerminalMode;
@@ -70,9 +74,21 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private TimerInterface $idleCheck;
 
     /**
-     * @var Channel[]
+     * @var array<int, Channel>
      */
-    private array $activeChannels = [];
+    private array $activeChannelsByLocalId = [];
+
+    /**
+     * @var array<string, array{requestedAddress: string, requestedPort: int, effectiveAddress: string, effectivePort: int, server: TcpServer, channels: array<int, ConnectionInterface>, pendingChannels: array<int, ConnectionInterface>}>
+     */
+    private array $remoteForwardListeners = [];
+
+    /**
+     * @var array<int, array{type: string, socket: ConnectionInterface, listenerKey: string, connectedAddress: string, connectedPort: int, originatorAddress: string, originatorPort: int, timeoutTimer: TimerInterface}>
+     */
+    private array $pendingOutboundChannelOpens = [];
+
+    private int $nextServerChannelId = 0;
 
     private string $serverVersion = 'SSH-2.0-ReactPHP-SSH_' . Server::VERSION;
     private string $inputBuffer = '';
@@ -88,6 +104,9 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private bool $serverIdentiferSent = false;
     private bool $kexInitSent = false;
     private bool $authenticationEnabled = false;
+    private bool $authenticated = true;
+    private bool $directTcpipEnabled = false;
+    private bool $remoteForwardingEnabled = false;
 
     /**
      * Indicates whether the connected SSH client supports the EXT_INFO (RFC 8308) message.
@@ -99,7 +118,20 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private int $maxPacketSize = 1024 * 1024; // This gets updated when the client opens a channel
     private int $authenticationFailureCount = 0;
     private float $deferredEventPromiseTimeout = 10.0; // The deferred event promises must resolve within the configured timeout period
+    private float $pendingForwardedChannelOpenTimeout = 10.0; // Outbound channel open requests (e.g. from direct-tcpip) must complete within this timeout period
     private bool $transportBackpressured = false;
+
+    /**
+     * @var array<int, ConnectionInterface>
+     */
+    private array $directTcpipSockets = [];
+
+    /**
+     * @var array<int, PromiseInterface<ConnectionInterface>>
+     */
+    private array $pendingDirectTcpipConnects = [];
+
+    private ConnectorInterface $connector;
 
     public function __construct(private ConnectionInterface $connection, private LoopInterface $loop)
     {
@@ -108,6 +140,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         $this->publicKeyValidator = new PublicKeyValidator(new Loggers\NullLogger());
         $this->packetHandler(new PacketHandler($this->connection));
         $this->setLogger(new Loggers\NullLogger());
+        $this->connector = new Connector($this->loop);
 
         Util::forwardEvents($this->connection, $this, ['close', 'error']);
         $this->connection->on('drain', function (): void {
@@ -248,6 +281,61 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     public function enableAuthentication(bool $enabled = false): self
     {
         $this->authenticationEnabled = $enabled;
+        $this->authenticated = ! $enabled;
+
+        return $this;
+    }
+
+    /**
+     * Enables or disables direct TCP/IP forwarding for this connection.
+     *
+     * When disabled, inbound `direct-tcpip` channel open requests are rejected.
+     * When enabled, each request must still be explicitly approved by a
+     * `direct-tcpip` event listener before the outbound TCP connection is created.
+     */
+    public function enableDirectTcpip(bool $enabled = true): self
+    {
+        $this->directTcpipEnabled = $enabled;
+
+        return $this;
+    }
+
+    /**
+     * Disables direct TCP/IP forwarding for this connection.
+     */
+    public function disableDirectTcpip(): self
+    {
+        return $this->enableDirectTcpip(false);
+    }
+
+    /**
+     * Enables or disables remote TCP forwarding for this connection.
+     *
+     * When disabled, `tcpip-forward` and `cancel-tcpip-forward` global requests are rejected.
+     * When enabled, each `tcpip-forward` request must still be explicitly approved by a
+     * `global-request.tcpip-forward` event listener.
+     */
+    public function enableRemoteForwarding(bool $enabled = true): self
+    {
+        $this->remoteForwardingEnabled = $enabled;
+
+        return $this;
+    }
+
+    /**
+     * Disables remote TCP forwarding for this connection.
+     */
+    public function disableRemoteForwarding(): self
+    {
+        return $this->enableRemoteForwarding(false);
+    }
+
+    /**
+     * Overrides the outbound socket connector used for direct TCP/IP requests.
+     */
+    public function setConnector(ConnectorInterface $connector): self
+    {
+        $this->connector = $connector;
 
         return $this;
     }
@@ -333,19 +421,35 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             return 0;
         }
 
-        if ($this->transportBackpressured || $channel->hasPendingOutboundData()) {
-            $channel->queueOutboundData($data);
-            $this->flushPendingChannelData();
+        try {
+            if ($channel->hasPendingRequestReply()) {
+                $channel->queueOutboundData($data);
+
+                return strlen($data);
+            }
+
+            if ($this->transportBackpressured || $channel->hasPendingOutboundData()) {
+                $channel->queueOutboundData($data);
+                $this->flushPendingChannelData();
+
+                return strlen($data);
+            }
+
+            $acceptedBytes = $this->writeChannelDataChunks($channel, $data);
+            if ($acceptedBytes < strlen($data)) {
+                $channel->queueOutboundData(substr($data, $acceptedBytes));
+            }
 
             return strlen($data);
-        }
+        } catch (\OverflowException $e) {
+            $this->warning('Channel outbound buffer exceeded close threshold', [
+                'channel_id' => $channel->getSenderChannel(),
+                'buffered_bytes' => $channel->getPendingOutboundByteCount(),
+            ]);
+            $this->closeChannel($channel);
 
-        $acceptedBytes = $this->writeChannelDataChunks($channel, $data);
-        if ($acceptedBytes < strlen($data)) {
-            $channel->queueOutboundData(substr($data, $acceptedBytes));
+            return 0;
         }
-
-        return strlen($data);
     }
 
     /**
@@ -353,7 +457,8 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     public function sendChannelEof(Channel $channel): void
     {
-        if (! isset($this->activeChannels[$channel->getRecipientChannel()])) {
+        $channelId = $channel->getSenderChannel();
+        if (! isset($this->activeChannelsByLocalId[$channelId])) {
             return;
         }
 
@@ -365,18 +470,17 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     public function closeChannel(Channel $channel): void
     {
-        $channelId = $channel->getRecipientChannel();
+        $channelId = $channel->getSenderChannel();
 
-        if (! isset($this->activeChannels[$channelId]) || $channel->hasSentClose()) {
+        if (! isset($this->activeChannelsByLocalId[$channelId]) || $channel->hasSentClose()) {
             return;
         }
 
-        $this->writePacked(MessageType::CHANNEL_CLOSE, $channelId);
+        $this->writePacked(MessageType::CHANNEL_CLOSE, $channel->getRecipientChannel());
         $channel->markCloseSent();
 
         if ($channel->hasReceivedClose()) {
-            $channel->finalizeClose();
-            unset($this->activeChannels[$channelId]);
+            $this->removeActiveChannel($channel);
             $this->emit('channel.close', [$channelId]);
         }
     }
@@ -496,7 +600,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     public function getChannel(int $channelId): ?Channel
     {
-        return $this->activeChannels[$channelId] ?? null;
+        return $this->activeChannelsByLocalId[$channelId] ?? null;
     }
 
     /**
@@ -505,6 +609,16 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     public function getUsername(): ?string
     {
         return $this->username;
+    }
+
+    /**
+     * Indicates whether the connection has completed authentication for connection-protocol messages.
+     *
+     * When authentication is disabled, connections are treated as authenticated immediately after setup.
+     */
+    public function isAuthenticated(): bool
+    {
+        return $this->authenticated;
     }
 
     /**
@@ -631,6 +745,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
             if (! $this->authenticationEnabled) {
                 $this->info("Client explicitly chose 'none' auth method after trying: {$this->lastAuthMethod}");
+                $this->markAuthenticated();
                 $this->writePacked(MessageType::USERAUTH_SUCCESS);
             } else {
                 $this->writePacked(MessageType::USERAUTH_FAILURE);
@@ -643,6 +758,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         // Handle keyboard-interactive auth - accept automatically
         if ('keyboard-interactive' === $method) {
             if (! $this->authenticationEnabled) {
+                $this->markAuthenticated();
                 $this->writePacked(MessageType::USERAUTH_SUCCESS);
 
                 return;
@@ -670,6 +786,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         // Handle password authentication
         if ('password' === $method) {
             if (! $this->authenticationEnabled) {
+                $this->markAuthenticated();
                 $this->writePacked(MessageType::USERAUTH_SUCCESS);
 
                 return;
@@ -696,6 +813,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                         return;
                     }
 
+                    $this->markAuthenticated();
                     $this->writePacked(MessageType::USERAUTH_SUCCESS);
                 }
             )->catch(
@@ -763,6 +881,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                                 return;
                             }
 
+                            $this->markAuthenticated();
                             $this->writePacked(MessageType::USERAUTH_SUCCESS);
                             $this->authenticatedPublicKey = $authenticatedPublicKey;
                         }
@@ -796,6 +915,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         if (! $this->authenticationEnabled) {
             // If we reached here, let them through without key authentication
             $this->info('Allowing access without key authentication');
+            $this->markAuthenticated();
             $this->writePacked(MessageType::USERAUTH_SUCCESS);
         } else {
             $availableAuthMethods = [
@@ -847,6 +967,7 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                 return;
             }
 
+            $this->markAuthenticated();
             $this->writePacked(MessageType::USERAUTH_SUCCESS);
         })->catch(function (\Throwable $e): void {
             $this->writePacked(MessageType::USERAUTH_FAILURE);
@@ -857,33 +978,135 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private function handleChannelOpen(Packet $packet): false|int
     {
         // Format: string (channel type) + 3 uint32s (sender channel, window size, max packet)
-        [$channelType, $senderChannel, $initialWindowSize, $maxPacketSize] = $packet->extractFormat('%s%u%u%u');
+        [$channelType, $remoteChannel, $initialWindowSize, $maxPacketSize] = $packet->extractFormat('%s%u%u%u');
         $this->maxPacketSize = (int) $maxPacketSize;
 
-        $this->info("Channel open request: type={$channelType}, sender={$senderChannel}, window={$initialWindowSize}, max_packet={$maxPacketSize}");
+        $this->info("Channel open request: type={$channelType}, sender={$remoteChannel}, window={$initialWindowSize}, max_packet={$maxPacketSize}");
 
-        // We'll use the same channel number for simplicity
-        $recipientChannel = $senderChannel;
+        if ('direct-tcpip' === $channelType) {
+            $this->handleDirectTcpipChannelOpen(
+                packet: $packet,
+                remoteChannel: (int) $remoteChannel,
+                initialWindowSize: (int) $initialWindowSize,
+                maxPacketSize: (int) $maxPacketSize,
+            );
+
+            return 0;
+        }
+
+        if ('session' !== $channelType) {
+            return $this->rejectChannelOpen(
+                remoteChannel: (int) $remoteChannel,
+                reason: ChannelOpenFailureReason::UNKNOWN_CHANNEL_TYPE,
+                description: "Inbound channel type {$channelType} not allowed"
+            );
+        }
+
+        $localChannel = $this->nextServerChannelId++;
 
         // Create new channel
         $channel = new Channel(
             $this,
-            (int) $recipientChannel,
-            (int) $senderChannel,
+            (int) $remoteChannel,
+            (int) $localChannel,
             (int) $initialWindowSize,
             (int) $maxPacketSize,
             (string) $channelType
         );
         $channel->setLogger($this->logger);
-        $this->activeChannels[$recipientChannel] = $channel;
+        $this->registerActiveChannel($channel);
 
         // Send channel open confirmation
-        $result = $this->writePacked(MessageType::CHANNEL_OPEN_CONFIRMATION, [$recipientChannel, $senderChannel, $initialWindowSize, $maxPacketSize]);
+        $result = $this->writePacked(MessageType::CHANNEL_OPEN_CONFIRMATION, [$remoteChannel, $localChannel, $initialWindowSize, $maxPacketSize]);
         if ($result) {
             $this->emit('channel.open', [$channel]);
         }
 
         return $result;
+    }
+
+    /**
+     * Handles an inbound `direct-tcpip` channel open request from the client.
+     */
+    private function handleDirectTcpipChannelOpen(Packet $packet, int $remoteChannel, int $initialWindowSize, int $maxPacketSize): void
+    {
+        [$destinationAddress, $destinationPort, $originatorAddress, $originatorPort] = $packet->extractFormat('%s%u%s%u');
+        if (! is_string($destinationAddress) || ! is_int($destinationPort) || ! is_string($originatorAddress) || ! is_int($originatorPort)) {
+            $this->rejectChannelOpen(
+                remoteChannel: $remoteChannel,
+                reason: ChannelOpenFailureReason::ADMINISTRATIVELY_PROHIBITED,
+                description: 'Invalid direct-tcpip channel open payload'
+            );
+
+            return;
+        }
+
+        if (! $this->directTcpipEnabled) {
+            $this->rejectChannelOpen(
+                remoteChannel: $remoteChannel,
+                reason: ChannelOpenFailureReason::ADMINISTRATIVELY_PROHIBITED,
+                description: 'Inbound channel type direct-tcpip not allowed'
+            );
+
+            return;
+        }
+
+        $listeners = $this->listeners('direct-tcpip');
+        if (0 === count($listeners)) {
+            $this->rejectChannelOpen(
+                remoteChannel: $remoteChannel,
+                reason: ChannelOpenFailureReason::ADMINISTRATIVELY_PROHIBITED,
+                description: 'Inbound channel type direct-tcpip requires explicit approval'
+            );
+
+            return;
+        }
+
+        $info = [
+            'destinationAddress' => $destinationAddress,
+            'destinationPort' => $destinationPort,
+            'originatorAddress' => $originatorAddress,
+            'originatorPort' => $originatorPort,
+        ];
+
+        $deferred = new Deferred();
+        $handled = false;
+        $accept = function () use (&$handled, $remoteChannel, $initialWindowSize, $maxPacketSize, $destinationAddress, $destinationPort): void {
+            if ($handled) {
+                throw new \RuntimeException('Direct TCP/IP request already handled');
+            }
+
+            $handled = true;
+            $this->openDirectTcpipSocket($remoteChannel, $initialWindowSize, $maxPacketSize, $destinationAddress, $destinationPort);
+        };
+        $reject = function () use (&$handled, $remoteChannel): void {
+            if ($handled) {
+                return;
+            }
+
+            $handled = true;
+            $this->rejectChannelOpen(
+                remoteChannel: $remoteChannel,
+                reason: ChannelOpenFailureReason::ADMINISTRATIVELY_PROHIBITED,
+                description: 'Direct TCP/IP request denied by server policy'
+            );
+        };
+
+        $this->emit('direct-tcpip', [$info, $deferred]);
+
+        /** @var PromiseInterface<bool> $requestPromise */
+        $requestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
+        $requestPromise->then(function (bool $allowed) use ($accept, $reject): void {
+            if ($allowed) {
+                $accept();
+
+                return;
+            }
+
+            $reject();
+        })->catch(static function () use ($reject): void {
+            $reject();
+        });
     }
 
     /**
@@ -897,26 +1120,14 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     private function handleChannelRequest(Packet $packet): void
     {
-        $disallowedChannelTypes = ['direct-tcpip'];
-
         [$recipientChannel, $requestType, $wantReply] = $packet->extractFormat('%u%s%b');
-        $this->info("Channel request: channel={$recipientChannel}, type={$requestType}, want_reply={$wantReply}");
+        $wantReplyText = $wantReply ? 'true' : 'false';
+        $this->info("Channel request: channel={$recipientChannel}, type={$requestType}, want_reply={$wantReplyText}");
 
         $channelSuccessReply = $this->packetHandler->packValue(MessageType::CHANNEL_SUCCESS, $recipientChannel);
         $channelFailureReply = $this->packetHandler->packValue(MessageType::CHANNEL_FAILURE, $recipientChannel);
 
-        if (in_array($requestType, $disallowedChannelTypes)) {
-            $this->error("Channel type {$requestType} not allowed");
-            if ($wantReply) {
-                $this->writeConnection($channelFailureReply);
-            }
-
-            $this->disconnect("Channel type {$requestType} not allowed");
-
-            return;
-        }
-
-        if (! isset($this->activeChannels[$recipientChannel])) {
+        if (! isset($this->activeChannelsByLocalId[$recipientChannel])) {
             $this->error("Channel {$recipientChannel} not found");
             if ($wantReply) {
                 $this->writeConnection($channelFailureReply);
@@ -925,7 +1136,9 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             return;
         }
 
-        $channel = $this->activeChannels[$recipientChannel];
+        $channel = $this->activeChannelsByLocalId[$recipientChannel];
+        $channelSuccessReply = $this->packetHandler->packValue(MessageType::CHANNEL_SUCCESS, $channel->getRecipientChannel());
+        $channelFailureReply = $this->packetHandler->packValue(MessageType::CHANNEL_FAILURE, $channel->getRecipientChannel());
 
         // Handle different request types
         switch ($requestType) {
@@ -950,7 +1163,10 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                     [$command] = $packet->extractFormat('%s');
                     $this->info("Received exec request with command: {$command}");
 
-                    $channel->beginRequestReply();
+                    if ($wantReply) {
+                        $channel->beginRequestReply();
+                    }
+
                     $deferred = new Deferred();
                     $channel->emit('exec-request', [$command, $deferred]);
 
@@ -959,18 +1175,18 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                     $execRequestPromise->then(function (bool $started) use ($channel, $wantReply, $channelSuccessReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->writeConnection($started ? $channelSuccessReply : $channelFailureReply);
+                            $channel->completeRequestReply();
+                            $this->flushPendingChannelData($channel);
+                            $channel->flushQueuedCloseOperations();
                         }
-
-                        $channel->completeRequestReply();
-                        $channel->flushQueuedCloseOperations();
                     })->catch(function (\Throwable $e) use ($channel, $wantReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->error($e->getMessage());
                             $this->writeConnection($channelFailureReply);
+                            $channel->completeRequestReply();
+                            $this->flushPendingChannelData($channel);
+                            $channel->flushQueuedCloseOperations();
                         }
-
-                        $channel->completeRequestReply();
-                        $channel->flushQueuedCloseOperations();
                     });
 
                     return;
@@ -985,7 +1201,10 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
 
             case 'shell':
                 if (count($channel->listeners('shell-request')) > 0) {
-                    $channel->beginRequestReply();
+                    if ($wantReply) {
+                        $channel->beginRequestReply();
+                    }
+
                     $deferred = new Deferred();
                     $channel->emit('shell-request', [$deferred]);
 
@@ -994,18 +1213,18 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                     $shellRequestPromise->then(function (bool $started) use ($channel, $wantReply, $channelSuccessReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->writeConnection($started ? $channelSuccessReply : $channelFailureReply);
+                            $channel->completeRequestReply();
+                            $this->flushPendingChannelData($channel);
+                            $channel->flushQueuedCloseOperations();
                         }
-
-                        $channel->completeRequestReply();
-                        $channel->flushQueuedCloseOperations();
                     })->catch(function (\Throwable $e) use ($channel, $wantReply, $channelFailureReply): void {
                         if ($wantReply) {
                             $this->error($e->getMessage());
                             $this->writeConnection($channelFailureReply);
+                            $channel->completeRequestReply();
+                            $this->flushPendingChannelData($channel);
+                            $channel->flushQueuedCloseOperations();
                         }
-
-                        $channel->completeRequestReply();
-                        $channel->flushQueuedCloseOperations();
                     });
 
                     return;
@@ -1066,13 +1285,13 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     {
         [$recipientChannel, $data] = $packet->extractFormat('%u%s');
 
-        if (! isset($this->activeChannels[$recipientChannel])) {
+        if (! isset($this->activeChannelsByLocalId[$recipientChannel])) {
             $this->error("Channel {$recipientChannel} not found");
 
             return;
         }
 
-        $channel = $this->activeChannels[$recipientChannel];
+        $channel = $this->activeChannelsByLocalId[$recipientChannel];
         $terminalInfo = $channel->getTerminalInfo();
 
         // Only convert CR to NL if ICRNL mode is enabled
@@ -1082,9 +1301,20 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             $data = preg_replace('/\r(?!\n)/', "\n", (string) $data);
         }
 
-        // Forward the data to the server from the client.
-        // A false result means the channel is currently buffering paused input.
-        $delivered = $channel->writeToServer((string) $data);
+        try {
+            // Forward the data to the server from the client.
+            // A false result means the channel is currently buffering paused input.
+            $delivered = $channel->writeToServer((string) $data);
+        } catch (\OverflowException $e) {
+            $this->warning('Channel inbound buffer exceeded disconnect threshold', [
+                'channel_id' => $recipientChannel,
+                'buffered_bytes' => $channel->getPendingInboundByteCount(),
+            ]);
+            $this->disconnect('Protocol error: channel inbound buffer overflow');
+
+            return;
+        }
+
         if (! $delivered) {
             $this->debug(sprintf(
                 'Channel %d backpressure active for %d inbound bytes',
@@ -1102,21 +1332,21 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     {
         [$channelId] = $packet->extractFormat('%u');
 
-        if (! isset($this->activeChannels[$channelId])) {
+        if (! isset($this->activeChannelsByLocalId[$channelId])) {
             return;
         }
 
-        $channel = $this->activeChannels[$channelId];
+        $channel = $this->activeChannelsByLocalId[$channelId];
         $channel->markCloseReceived();
 
         if (! $channel->hasSentClose()) {
-            $this->writePacked(MessageType::CHANNEL_CLOSE, $channelId);
+            $this->writePacked(MessageType::CHANNEL_CLOSE, $channel->getRecipientChannel());
             $channel->markCloseSent();
         }
 
-        $channel->finalizeClose();
-        unset($this->activeChannels[$channelId]);
-        $this->emit('channel.close', [$channelId]);
+        $localChannelId = $channel->getSenderChannel();
+        $this->removeActiveChannel($channel);
+        $this->emit('channel.close', [$localChannelId]);
     }
 
     /**
@@ -1129,12 +1359,17 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     {
         [$channelId] = $packet->extractFormat('%u');
 
-        if (! isset($this->activeChannels[$channelId])) {
+        if (! isset($this->activeChannelsByLocalId[$channelId])) {
             return;
         }
 
-        $channel = $this->activeChannels[$channelId];
-        $channel->markInputClosed();
+        $channel = $this->activeChannelsByLocalId[$channelId];
+        if (in_array($channel->getChannelType(), ['forwarded-tcpip', 'direct-tcpip'], true)) {
+            $channel->markInputClosedSilently();
+        } else {
+            $channel->markInputClosed();
+        }
+
         $this->emit('channel.end', [$channel]);
     }
 
@@ -1369,6 +1604,12 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                 . ($this->packetHandler->hasRekeyInProgress() ? 'rekey process' : 'initial key exchange'));
         }
 
+        if (! $this->isAuthenticated() && ! $this->isAllowedBeforeAuthentication($packet->type)) {
+            $this->disconnectForUnauthorizedPacket($packet->type);
+
+            return $packet;
+        }
+
         match ($packet->type) {
             MessageType::DISCONNECT => $this->handleDisconnect($packet),
             MessageType::KEXINIT => $this->handleKexInit($packet),
@@ -1378,6 +1619,8 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             MessageType::USERAUTH_REQUEST => $this->handleUserAuthRequest($packet), // 'Can we login please?'
             MessageType::USERAUTH_INFO_RESPONSE => $this->handleUserAuthInfoResponse($packet),
             MessageType::CHANNEL_OPEN => $this->handleChannelOpen($packet), // 'I want to open a channel'
+            MessageType::CHANNEL_OPEN_CONFIRMATION => $this->handleChannelOpenConfirmation($packet),
+            MessageType::CHANNEL_OPEN_FAILURE => $this->handleChannelOpenFailure($packet),
             MessageType::CHANNEL_REQUEST => $this->handleChannelRequest($packet), // 'Lets use this channel for [shell, exec, subsystem, x11, forward, auth-agent, etc..]'
             MessageType::CHANNEL_WINDOW_ADJUST => $this->handleChannelWindowAdjust($packet),
             MessageType::CHANNEL_DATA => $this->handleChannelData($packet), // 'I'm sending you some data' (key press in our case usually)
@@ -1391,6 +1634,70 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
         };
 
         return $packet;
+    }
+
+    /**
+     * Marks the connection as authenticated after a successful userauth exchange.
+     */
+    private function markAuthenticated(): void
+    {
+        $this->authenticated = true;
+    }
+
+    /**
+     * Determines whether the given packet type is valid before user authentication completes.
+     *
+     * This permits only transport and authentication-phase messages until the client has been
+     * explicitly authenticated.
+     */
+    private function isAllowedBeforeAuthentication(MessageType $type): bool
+    {
+        return match ($type) {
+            MessageType::DISCONNECT,
+            MessageType::IGNORE,
+            MessageType::DEBUG,
+            MessageType::UNIMPLEMENTED,
+            MessageType::KEXINIT,
+            MessageType::KEXDH_INIT,
+            MessageType::NEWKEYS,
+            MessageType::SERVICE_REQUEST,
+            MessageType::USERAUTH_REQUEST,
+            MessageType::USERAUTH_INFO_RESPONSE => true,
+            default => false,
+        };
+    }
+
+    /**
+     * Disconnects the client after receiving a connection-protocol packet before authentication.
+     */
+    private function disconnectForUnauthorizedPacket(MessageType $type): void
+    {
+        $this->warning('Received connection-protocol packet before authentication completed', [
+            'message_type' => $type->name,
+        ]);
+
+        $this->disconnect(
+            'Protocol error: received ' . $type->name . ' before authentication completed',
+            DisconnectReason::PROTOCOL_ERROR
+        );
+    }
+
+    /**
+     * Rejects a client channel-open request without creating server-side channel state.
+     */
+    private function rejectChannelOpen(int $remoteChannel, ChannelOpenFailureReason $reason, string $description): false|int
+    {
+        $this->warning($description, [
+            'remote_channel' => $remoteChannel,
+            'reason' => $reason->name,
+        ]);
+
+        return $this->writePacked(MessageType::CHANNEL_OPEN_FAILURE, [
+            $remoteChannel,
+            $reason->value,
+            $description,
+            'en',
+        ]);
     }
 
     /**
@@ -1445,7 +1752,8 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     {
         [$channelId, $bytesToAdd] = $packet->extractFormat('%u%u');
 
-        if (! isset($this->activeChannels[$channelId])) {
+        $channel = $this->activeChannelsByLocalId[$channelId] ?? null;
+        if (! $channel instanceof Channel) {
             $this->debug("Ignoring window adjust for unknown channel {$channelId}");
 
             return;
@@ -1457,7 +1765,6 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             return;
         }
 
-        $channel = $this->activeChannels[$channelId];
         $channel->increaseRemoteWindow((int) $bytesToAdd);
         $this->flushPendingChannelData($channel);
     }
@@ -1465,9 +1772,9 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private function flushPendingChannelData(?Channel $priorityChannel = null): void
     {
         $channels = null === $priorityChannel
-            ? array_values($this->activeChannels)
+            ? array_values($this->activeChannelsByLocalId)
             : array_merge([$priorityChannel], array_values(array_filter(
-                $this->activeChannels,
+                $this->activeChannelsByLocalId,
                 static fn (Channel $channel): bool => $channel !== $priorityChannel
             )));
 
@@ -1551,13 +1858,610 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     private function handleGlobalRequest(Packet $packet): void
     {
         [$requestType, $wantReply] = $packet->extractFormat('%s%b');
-        $this->debug("Received GLOBAL_REQUEST: {$requestType}, want_reply={$wantReply}");
+        $wantReplyText = $wantReply ? 'true' : 'false';
+        $this->debug("Received GLOBAL_REQUEST: {$requestType}, want_reply={$wantReplyText}");
 
-        if ($wantReply) {
-            $this->writePacked(MessageType::REQUEST_FAILURE, false);
+        match ($requestType) {
+            'tcpip-forward' => $this->handleTcpipForwardRequest($packet, (bool) $wantReply),
+            'cancel-tcpip-forward' => $this->handleCancelTcpipForwardRequest($packet, (bool) $wantReply),
+            default => $this->replyToGlobalRequest((bool) $wantReply, false),
+        };
+    }
+
+    /**
+     * Finalizes a server-initiated `forwarded-tcpip` channel open after client confirmation.
+     *
+     * This promotes the pending outbound open into an active channel and wires the
+     * accepted TCP socket into the normal SSH channel data flow.
+     */
+    private function handleChannelOpenConfirmation(Packet $packet): void
+    {
+        [$localChannel, $remoteChannel, $initialWindow, $maxPacketSize] = $packet->extractFormat('%u%u%u%u');
+        if (! is_int($localChannel) || ! is_int($remoteChannel) || ! is_int($initialWindow) || ! is_int($maxPacketSize)) {
+            throw new \UnexpectedValueException('Invalid channel open confirmation payload');
         }
 
-        $this->disconnect('Global request not supported');
+        $pending = $this->takePendingOutboundChannelOpen($localChannel);
+        if (! is_array($pending)) {
+            $this->debug("Ignoring channel open confirmation for unknown local channel {$localChannel}");
+
+            return;
+        }
+
+        $channel = new Channel(
+            $this,
+            (int) $remoteChannel,
+            (int) $localChannel,
+            (int) $initialWindow,
+            (int) $maxPacketSize,
+            (string) $pending['type']
+        );
+        $channel->setLogger($this->logger);
+        $this->registerActiveChannel($channel);
+
+        $socket = $pending['socket'];
+        $this->attachForwardedSocketHandlers($channel, $socket, (string) $pending['listenerKey']);
+        $this->detachRemoteForwardChannelSocket((string) $pending['listenerKey'], $localChannel);
+        $this->registerRemoteForwardChannelSocket((string) $pending['listenerKey'], $localChannel, $socket, true);
+        $socket->resume();
+    }
+
+    /**
+     * Cleans up a pending server-initiated `forwarded-tcpip` channel open after client rejection.
+     */
+    private function handleChannelOpenFailure(Packet $packet): void
+    {
+        [$localChannel, $reasonCode, $description] = $packet->extractFormat('%u%u%s%s');
+        if (! is_int($localChannel) || ! is_int($reasonCode) || ! is_string($description)) {
+            throw new \UnexpectedValueException('Invalid channel open failure payload');
+        }
+
+        $pending = $this->takePendingOutboundChannelOpen($localChannel);
+        if (! is_array($pending)) {
+            $this->debug("Ignoring channel open failure for unknown local channel {$localChannel}");
+
+            return;
+        }
+
+        $this->detachRemoteForwardChannelSocket((string) $pending['listenerKey'], $localChannel);
+        $pending['socket']->close();
+
+        $this->warning("Forwarded channel open failed: {$description}", [
+            'local_channel' => $localChannel,
+            'reason_code' => $reasonCode,
+        ]);
+    }
+
+    /**
+     * Handles an incoming `tcpip-forward` global request.
+     *
+     * Remote forwarding must be enabled explicitly and each request must be approved
+     * by a `global-request.tcpip-forward` event listener before a listening socket is created.
+     */
+    private function handleTcpipForwardRequest(Packet $packet, bool $wantReply): void
+    {
+        if (! $this->remoteForwardingEnabled) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        [$bindAddress, $bindPort] = $packet->extractFormat('%s%u');
+        if (! is_string($bindAddress) || ! is_int($bindPort)) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        $listeners = $this->listeners('global-request.tcpip-forward');
+        if (0 === count($listeners)) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        $deferred = new Deferred();
+        $handled = false;
+        $accept = function () use (&$handled, $wantReply, $bindAddress, $bindPort): void {
+            if ($handled) {
+                throw new \RuntimeException('Forward request already handled');
+            }
+
+            $handled = true;
+            $this->createRemoteForwardListener($bindAddress, $bindPort, $wantReply);
+        };
+        $reject = function () use (&$handled, $wantReply): void {
+            if ($handled) {
+                return;
+            }
+
+            $handled = true;
+            $this->replyToGlobalRequest($wantReply, false);
+        };
+
+        $this->emit('global-request.tcpip-forward', [$bindAddress, $bindPort, $deferred]);
+
+        /** @var PromiseInterface<bool> $requestPromise */
+        $requestPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
+        $requestPromise->then(function (bool $allowed) use ($accept, $reject): void {
+            if ($allowed) {
+                $accept();
+
+                return;
+            }
+
+            $reject();
+        })->catch(static function () use ($reject): void {
+            $reject();
+        });
+    }
+
+    /**
+     * Handles an incoming `cancel-tcpip-forward` global request.
+     */
+    private function handleCancelTcpipForwardRequest(Packet $packet, bool $wantReply): void
+    {
+        if (! $this->remoteForwardingEnabled) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        [$bindAddress, $bindPort] = $packet->extractFormat('%s%u');
+        if (! is_string($bindAddress) || ! is_int($bindPort)) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        $bindAddress = $this->normalizeRemoteForwardBindAddress($bindAddress);
+
+        $this->emit('global-request.cancel-tcpip-forward', [$bindAddress, $bindPort]);
+
+        $listenerKey = $this->remoteForwardListenerKey($bindAddress, $bindPort);
+        if (! isset($this->remoteForwardListeners[$listenerKey])) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        $this->closeRemoteForwardListener($listenerKey);
+        $this->replyToGlobalRequest($wantReply, true);
+    }
+
+    /**
+     * Creates and registers a server-side TCP listener for an approved remote forward.
+     */
+    private function createRemoteForwardListener(string $bindAddress, int $bindPort, bool $wantReply): void
+    {
+        $bindAddress = $this->normalizeRemoteForwardBindAddress($bindAddress);
+
+        if (! $this->isValidRemoteForwardRequest($bindAddress, $bindPort)) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        $listenerKey = $this->remoteForwardListenerKey($bindAddress, $bindPort);
+        if (isset($this->remoteForwardListeners[$listenerKey])) {
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        $bindTarget = $this->toTcpServerBindTarget($bindAddress, $bindPort);
+
+        try {
+            $server = new TcpServer($bindTarget, $this->loop);
+        } catch (\Throwable $e) {
+            $this->warning('Failed to create remote forward listener: ' . $e->getMessage(), [
+                'bind_address' => $bindAddress,
+                'bind_port' => $bindPort,
+            ]);
+            $this->replyToGlobalRequest($wantReply, false);
+
+            return;
+        }
+
+        [$effectiveAddress, $effectivePort] = $this->parseSocketAddress($server->getAddress());
+        $this->remoteForwardListeners[$listenerKey] = [
+            'requestedAddress' => $bindAddress,
+            'requestedPort' => $bindPort,
+            'effectiveAddress' => $effectiveAddress,
+            'effectivePort' => $effectivePort,
+            'server' => $server,
+            'channels' => [],
+            'pendingChannels' => [],
+        ];
+
+        $server->on('connection', function (ConnectionInterface $socket) use ($listenerKey): void {
+            $this->handleRemoteForwardAcceptedSocket($listenerKey, $socket);
+        });
+        $server->on('close', function () use ($listenerKey): void {
+            unset($this->remoteForwardListeners[$listenerKey]);
+        });
+
+        if (0 === $bindPort) {
+            $this->replyToGlobalRequest($wantReply, true, [$effectivePort]);
+
+            return;
+        }
+
+        $this->replyToGlobalRequest($wantReply, true);
+    }
+
+    /**
+     * Opens a server-initiated `forwarded-tcpip` channel for an accepted forwarded TCP socket.
+     */
+    private function handleRemoteForwardAcceptedSocket(string $listenerKey, ConnectionInterface $socket): void
+    {
+        $listener = $this->remoteForwardListeners[$listenerKey] ?? null;
+        if (! is_array($listener)) {
+            $socket->close();
+
+            return;
+        }
+
+        // Hold inbound TCP bytes until the client confirms the forwarded channel.
+        $socket->pause();
+
+        [$originatorAddress, $originatorPort] = $this->parseSocketAddress($socket->getRemoteAddress());
+        $localChannel = $this->nextServerChannelId++;
+        $timeoutTimer = $this->loop->addTimer($this->pendingForwardedChannelOpenTimeout, function () use ($localChannel): void {
+            $pending = $this->takePendingOutboundChannelOpen($localChannel);
+            if (! is_array($pending)) {
+                return;
+            }
+
+            $this->detachRemoteForwardChannelSocket((string) $pending['listenerKey'], $localChannel);
+            $pending['socket']->close();
+            $this->warning('Timed out waiting for forwarded channel open confirmation', [
+                'local_channel' => $localChannel,
+                'listener_key' => $pending['listenerKey'],
+            ]);
+        });
+
+        $this->pendingOutboundChannelOpens[$localChannel] = [
+            'type' => 'forwarded-tcpip',
+            'socket' => $socket,
+            'listenerKey' => $listenerKey,
+            'connectedAddress' => $listener['requestedAddress'],
+            'connectedPort' => 0 === $listener['requestedPort'] ? $listener['effectivePort'] : $listener['requestedPort'],
+            'originatorAddress' => $originatorAddress,
+            'originatorPort' => $originatorPort,
+            'timeoutTimer' => $timeoutTimer,
+        ];
+        $this->registerRemoteForwardChannelSocket($listenerKey, $localChannel, $socket, false);
+        $this->emit('forwarded-tcpip.connection', [[
+            'bindAddress' => $listener['requestedAddress'],
+            'bindPort' => 0 === $listener['requestedPort'] ? $listener['effectivePort'] : $listener['requestedPort'],
+            'originatorAddress' => $originatorAddress,
+            'originatorPort' => $originatorPort,
+        ], $socket]);
+
+        $result = $this->writePacked(MessageType::CHANNEL_OPEN, [
+            'forwarded-tcpip',
+            $localChannel,
+            1024 * 1024,
+            32768,
+            $listener['requestedAddress'],
+            0 === $listener['requestedPort'] ? $listener['effectivePort'] : $listener['requestedPort'],
+            $originatorAddress,
+            $originatorPort,
+        ]);
+
+        if (false === $result) {
+            $pending = $this->takePendingOutboundChannelOpen($localChannel);
+            if (! is_array($pending)) {
+                return;
+            }
+
+            $this->detachRemoteForwardChannelSocket((string) $pending['listenerKey'], $localChannel);
+            $pending['socket']->close();
+        }
+    }
+
+    /**
+     * Bridges a confirmed `forwarded-tcpip` SSH channel to its accepted TCP socket.
+     */
+    private function attachForwardedSocketHandlers(Channel $channel, ConnectionInterface $socket, string $listenerKey): void
+    {
+        $this->attachTcpipSocketHandlers(
+            channel: $channel,
+            socket: $socket,
+            onSocketClose: function () use ($listenerKey, $channel): void {
+                $this->detachRemoteForwardChannelSocket($listenerKey, $channel->getSenderChannel());
+            },
+            onChannelClose: function () use ($listenerKey, $channel): void {
+                $this->detachRemoteForwardChannelSocket($listenerKey, $channel->getSenderChannel());
+            }
+        );
+    }
+
+    /**
+     * Bridges a confirmed `direct-tcpip` SSH channel to its outbound TCP socket.
+     */
+    private function attachDirectTcpipSocketHandlers(Channel $channel, ConnectionInterface $socket): void
+    {
+        $this->attachTcpipSocketHandlers(
+            channel: $channel,
+            socket: $socket,
+            onSocketClose: function () use ($channel): void {
+                unset($this->directTcpipSockets[$channel->getSenderChannel()]);
+            },
+            onChannelClose: function () use ($channel): void {
+                unset($this->directTcpipSockets[$channel->getSenderChannel()]);
+            }
+        );
+    }
+
+    /**
+     * Wires a TCP socket into a stream-oriented SSH channel lifecycle.
+     */
+    private function attachTcpipSocketHandlers(Channel $channel, ConnectionInterface $socket, callable $onSocketClose, callable $onChannelClose): void
+    {
+        $socket->on('data', function (mixed $data) use ($channel): void {
+            if (! is_scalar($data) && ! (is_object($data) && method_exists($data, '__toString'))) {
+                return;
+            }
+
+            $channel->write((string) $data);
+        });
+        $socket->on('end', function () use ($channel): void {
+            $channel->end();
+        });
+        $socket->on('close', function () use ($channel, $onSocketClose): void {
+            $onSocketClose();
+            $channel->close();
+        });
+        $channel->on('data', static function (string $data) use ($socket): void {
+            $socket->write($data);
+        });
+        $channel->on('close', function () use ($socket, $onChannelClose): void {
+            $onChannelClose();
+            $socket->close();
+        });
+    }
+
+    /**
+     * Attempts to connect an approved `direct-tcpip` request to its destination.
+     */
+    private function openDirectTcpipSocket(int $remoteChannel, int $initialWindowSize, int $maxPacketSize, string $destinationAddress, int $destinationPort): void
+    {
+        $connectTarget = $this->toConnectTarget($destinationAddress, $destinationPort);
+
+        /** @var PromiseInterface<ConnectionInterface> $connectPromise */
+        $connectPromise = $this->connector->connect($connectTarget);
+        $this->pendingDirectTcpipConnects[$remoteChannel] = $connectPromise;
+
+        $connectPromise->then(function (ConnectionInterface $socket) use ($remoteChannel, $initialWindowSize, $maxPacketSize): void {
+            unset($this->pendingDirectTcpipConnects[$remoteChannel]);
+
+            if (! $this->connection->isWritable()) {
+                $socket->close();
+
+                return;
+            }
+
+            $localChannel = $this->nextServerChannelId++;
+            $channel = new Channel(
+                $this,
+                $remoteChannel,
+                $localChannel,
+                $initialWindowSize,
+                $maxPacketSize,
+                'direct-tcpip'
+            );
+            $channel->setLogger($this->logger);
+            $this->registerActiveChannel($channel);
+            $this->directTcpipSockets[$localChannel] = $socket;
+
+            $result = $this->writePacked(MessageType::CHANNEL_OPEN_CONFIRMATION, [$remoteChannel, $localChannel, $initialWindowSize, $maxPacketSize]);
+            if (false === $result) {
+                unset($this->directTcpipSockets[$localChannel]);
+                $this->removeActiveChannel($channel);
+                $socket->close();
+
+                return;
+            }
+
+            $this->attachDirectTcpipSocketHandlers($channel, $socket);
+            $this->emit('channel.open', [$channel]);
+        })->catch(function (\Throwable $e) use ($remoteChannel): void {
+            unset($this->pendingDirectTcpipConnects[$remoteChannel]);
+            $this->rejectChannelOpen(
+                remoteChannel: $remoteChannel,
+                reason: ChannelOpenFailureReason::CONNECT_FAILED,
+                description: 'Direct TCP/IP connect failed: ' . $e->getMessage()
+            );
+        });
+    }
+
+    /**
+     * Sends a success or failure reply for a global request when the client asked for one.
+     *
+     * @param array<int, int|string> $values optional success payload fields
+     */
+    private function replyToGlobalRequest(bool $wantReply, bool $success, array $values = []): void
+    {
+        if (! $wantReply) {
+            return;
+        }
+
+        $this->writePacked($success ? MessageType::REQUEST_SUCCESS : MessageType::REQUEST_FAILURE, $values);
+    }
+
+    /**
+     * Validates whether a remote-forward bind request is supported by the current policy.
+     */
+    private function isValidRemoteForwardRequest(string $bindAddress, int $bindPort): bool
+    {
+        if ($bindPort < 0 || $bindPort > 65535) {
+            return false;
+        }
+
+        $bindAddress = $this->normalizeRemoteForwardBindAddress($bindAddress);
+
+        return in_array($bindAddress, ['127.0.0.1', '0.0.0.0', '::1', '::', 'localhost'], true)
+            || false !== filter_var($bindAddress, FILTER_VALIDATE_IP);
+    }
+
+    /**
+     * Converts an SSH bind address and port into a ReactPHP `TcpServer` bind target.
+     */
+    private function toTcpServerBindTarget(string $bindAddress, int $bindPort): string
+    {
+        $bindAddress = $this->normalizeRemoteForwardBindAddress($bindAddress);
+
+        if (str_contains($bindAddress, ':') && ! str_starts_with($bindAddress, '[')) {
+            return sprintf('[%s]:%d', $bindAddress, $bindPort);
+        }
+
+        return sprintf('%s:%d', $bindAddress, $bindPort);
+    }
+
+    /**
+     * Converts a direct TCP/IP destination into a ReactPHP connector target.
+     */
+    private function toConnectTarget(string $destinationAddress, int $destinationPort): string
+    {
+        if (str_contains($destinationAddress, ':') && ! str_starts_with($destinationAddress, '[')) {
+            return sprintf('[%s]:%d', $destinationAddress, $destinationPort);
+        }
+
+        return sprintf('%s:%d', $destinationAddress, $destinationPort);
+    }
+
+    /**
+     * Canonicalizes remote-forward bind addresses so equivalent IPv6 forms share one listener key.
+     */
+    private function normalizeRemoteForwardBindAddress(string $bindAddress): string
+    {
+        $bindAddress = strtolower($bindAddress);
+
+        if (str_starts_with($bindAddress, '[') && str_ends_with($bindAddress, ']')) {
+            return substr($bindAddress, 1, -1);
+        }
+
+        return $bindAddress;
+    }
+
+    /**
+     * Parses a ReactPHP socket URI into host and port components.
+     *
+     * @return array{0: string, 1: int}
+     */
+    private function parseSocketAddress(?string $address): array
+    {
+        if (! is_string($address)) {
+            return ['0.0.0.0', 0];
+        }
+
+        $host = parse_url($address, PHP_URL_HOST);
+        $port = parse_url($address, PHP_URL_PORT);
+
+        return [
+            is_string($host) ? trim($host, '[]') : '0.0.0.0',
+            is_int($port) ? $port : 0,
+        ];
+    }
+
+    /**
+     * Builds the internal array key used to track remote-forward listeners.
+     */
+    private function remoteForwardListenerKey(string $bindAddress, int $bindPort): string
+    {
+        $bindAddress = $this->normalizeRemoteForwardBindAddress($bindAddress);
+
+        return $bindAddress . ':' . $bindPort;
+    }
+
+    /**
+     * Registers an active channel under the server-local channel id maps.
+     */
+    private function registerActiveChannel(Channel $channel): void
+    {
+        $this->activeChannelsByLocalId[$channel->getSenderChannel()] = $channel;
+    }
+
+    /**
+     * Removes an active channel from connection bookkeeping and finalizes its close state.
+     */
+    private function removeActiveChannel(Channel $channel): void
+    {
+        unset($this->activeChannelsByLocalId[$channel->getSenderChannel()]);
+        $channel->finalizeClose();
+    }
+
+    /**
+     * Tracks an accepted forwarded TCP socket under its listener state.
+     */
+    private function registerRemoteForwardChannelSocket(string $listenerKey, int $channelId, ConnectionInterface $socket, bool $active): void
+    {
+        if (! isset($this->remoteForwardListeners[$listenerKey])) {
+            return;
+        }
+
+        $bucket = $active ? 'channels' : 'pendingChannels';
+        $this->remoteForwardListeners[$listenerKey][$bucket][$channelId] = $socket;
+    }
+
+    /**
+     * Removes a forwarded TCP socket from listener bookkeeping.
+     */
+    private function detachRemoteForwardChannelSocket(string $listenerKey, int $channelId): void
+    {
+        if (! isset($this->remoteForwardListeners[$listenerKey])) {
+            return;
+        }
+
+        unset(
+            $this->remoteForwardListeners[$listenerKey]['channels'][$channelId],
+            $this->remoteForwardListeners[$listenerKey]['pendingChannels'][$channelId]
+        );
+    }
+
+    /**
+     * Removes a pending outbound channel open and cancels its timeout.
+     *
+     * @return null|array{type: string, socket: ConnectionInterface, listenerKey: string, connectedAddress: string, connectedPort: int, originatorAddress: string, originatorPort: int, timeoutTimer: TimerInterface}
+     */
+    private function takePendingOutboundChannelOpen(int $localChannel): ?array
+    {
+        $pending = $this->pendingOutboundChannelOpens[$localChannel] ?? null;
+        if (! is_array($pending)) {
+            return null;
+        }
+
+        unset($this->pendingOutboundChannelOpens[$localChannel]);
+        $this->loop->cancelTimer($pending['timeoutTimer']);
+
+        return $pending;
+    }
+
+    /**
+     * Closes a remote-forward listener and all sockets or channels associated with it.
+     */
+    private function closeRemoteForwardListener(string $listenerKey): void
+    {
+        $listener = $this->remoteForwardListeners[$listenerKey] ?? null;
+        if (! is_array($listener)) {
+            return;
+        }
+
+        foreach (array_merge($listener['channels'], $listener['pendingChannels']) as $channelId => $socket) {
+            $this->takePendingOutboundChannelOpen($channelId);
+
+            $channel = $this->activeChannelsByLocalId[$channelId] ?? null;
+            if ($channel instanceof Channel) {
+                $this->removeActiveChannel($channel);
+            }
+
+            $socket->close();
+        }
+
+        $listener['server']->close();
+        unset($this->remoteForwardListeners[$listenerKey]);
     }
 
     private function handleKexInit(Packet $packet): void
@@ -1813,11 +2717,28 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
      */
     private function cleanup(): void
     {
-        // Close all active channels
-        array_map(static fn (Channel $channel) => $channel->finalizeClose(), $this->activeChannels);
-        $this->activeChannels = [];
+        foreach ($this->pendingDirectTcpipConnects as $connectPromise) {
+            $connectPromise->cancel();
+        }
 
-        $this->loop->cancelTimer($this->idleCheck);
+        foreach ($this->directTcpipSockets as $socket) {
+            $socket->close();
+        }
+
+        foreach (array_keys($this->remoteForwardListeners) as $listenerKey) {
+            $this->closeRemoteForwardListener($listenerKey);
+        }
+
+        // Close all active channels
+        array_map(static fn (Channel $channel) => $channel->finalizeClose(), $this->activeChannelsByLocalId);
+        $this->activeChannelsByLocalId = [];
+        $this->directTcpipSockets = [];
+        $this->pendingDirectTcpipConnects = [];
+        $this->pendingOutboundChannelOpens = [];
+
+        if (isset($this->idleCheck)) {
+            $this->loop->cancelTimer($this->idleCheck);
+        }
     }
 
     /**

@@ -45,7 +45,7 @@ final class Server extends EventEmitter implements ServerInterface
      *
      * This value is used in the server identification string during the SSH handshake.
      */
-    public const VERSION = '1.0.5';
+    public const VERSION = '1.1.0';
 
     /**
      * Server host keys for SSH identity.
@@ -61,6 +61,8 @@ final class Server extends EventEmitter implements ServerInterface
 
     private ?string $banner = null;
     private bool $authenticationEnabled = false;
+    private bool $directTcpipEnabled = false;
+    private bool $remoteForwardingEnabled = false;
 
     /**
      * Constructs a new SSH server instance.
@@ -98,6 +100,8 @@ final class Server extends EventEmitter implements ServerInterface
                 ->setLogger($this->logger)
                 ->setServerHostKeys($this->hostKeys)
                 ->enableAuthentication($this->authenticationEnabled)
+                ->enableDirectTcpip($this->directTcpipEnabled)
+                ->enableRemoteForwarding($this->remoteForwardingEnabled)
                 ->handle()
             ;
 
@@ -130,6 +134,52 @@ final class Server extends EventEmitter implements ServerInterface
     public function disableAuthentication(): self
     {
         $this->authenticationEnabled = false;
+
+        return $this;
+    }
+
+    /**
+     * Enables direct TCP/IP forwarding for incoming SSH connections.
+     *
+     * Even when enabled, each `direct-tcpip` request must still be explicitly approved
+     * by handling the `direct-tcpip` connection event.
+     */
+    public function enableDirectTcpip(): self
+    {
+        $this->directTcpipEnabled = true;
+
+        return $this;
+    }
+
+    /**
+     * Disables direct TCP/IP forwarding for incoming SSH connections.
+     */
+    public function disableDirectTcpip(): self
+    {
+        $this->directTcpipEnabled = false;
+
+        return $this;
+    }
+
+    /**
+     * Enables remote TCP forwarding for incoming SSH connections.
+     *
+     * Even when enabled, each `tcpip-forward` request must still be explicitly approved
+     * by handling the `global-request.tcpip-forward` connection event.
+     */
+    public function enableRemoteForwarding(): self
+    {
+        $this->remoteForwardingEnabled = true;
+
+        return $this;
+    }
+
+    /**
+     * Disables remote TCP forwarding for incoming SSH connections.
+     */
+    public function disableRemoteForwarding(): self
+    {
+        $this->remoteForwardingEnabled = false;
 
         return $this;
     }

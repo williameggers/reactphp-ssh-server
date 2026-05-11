@@ -24,31 +24,12 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-require __DIR__ . '/../vendor/autoload.php';
+namespace WilliamEggers\React\SSH\Enums;
 
-use React\Promise\Deferred;
-use React\Socket\LimitingServer;
-use WilliamEggers\React\SSH\Channel;
-use WilliamEggers\React\SSH\Connection;
-use WilliamEggers\React\SSH\Server;
-
-$limitingServer = new LimitingServer(
-    new Server('127.0.0.1:2222'),
-    1
-);
-
-$limitingServer->on('connection', static function (Connection $connection): void {
-    $connection->on('channel.open', static function (Channel $channel): void {
-        $channel->on('shell-request', static function (Deferred $started) use ($channel): void {
-            $started->resolve(true);
-
-            $channel->write('Hello ' . $channel->getConnection()->getRemoteAddress() . "!\r\n");
-            $channel->write("Welcome to this SSH server that will only accept 1 connection!\r\n");
-            $channel->write("Here's a tip: don't say anything.\r\n");
-
-            $channel->on('data', static function ($data) use ($channel): void {
-                $channel->getConnection()->close();
-            });
-        });
-    });
-});
+enum ChannelOpenFailureReason: int
+{
+    case ADMINISTRATIVELY_PROHIBITED = 1;
+    case CONNECT_FAILED = 2;
+    case UNKNOWN_CHANNEL_TYPE = 3;
+    case RESOURCE_SHORTAGE = 4;
+}
