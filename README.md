@@ -6,6 +6,8 @@
 
 This project is an event-driven, standalone SSH server implementation for [ReactPHP](https://reactphp.org/) developed by William Eggers. It extends the code from Ashley Hindle’s excellent [Whisp PHP SSH server](https://github.com/WhispPHP/whisp), with substantial modifications and refactoring to suit ReactPHP.
 
+> Looking for an SSH client? Check out [williameggers/reactphp-ssh-client](https://github.com/williameggers/reactphp-ssh-client).
+
 ## Overview
 
 * Implements core SSH protocol functionality, including transport negotiation, authentication, and channel lifecycle management
@@ -806,3 +808,5 @@ This project is a derivative work based on Whisp PHP SSH by Ashley Hindle, and i
 
 Licensed under the MIT License
 Whisp provided the core implementation of SSH transport, packet handling, and protocol logic. This project builds on that foundation with modifications suitable for ReactPHP compatibility and extended use cases.
+
+If you are using both sides of the stack, see also [`williameggers/reactphp-ssh-client`](https://github.com/williameggers/reactphp-ssh-client).
