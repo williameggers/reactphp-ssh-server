@@ -280,8 +280,8 @@ final class ServerHostKey implements EventEmitterInterface
 
     private function shouldUseBlockingFileIo(): bool
     {
-        // libuv-backed loops do not support polling regular files as streams.
-        return $this->getLoop() instanceof ExtUvLoop;
+        // windows and libuv-backed loops do not support polling regular files as streams.
+        return PHP_OS_FAMILY === 'Windows' || $this->getLoop() instanceof ExtUvLoop;
     }
 
     private function markReady(): void
