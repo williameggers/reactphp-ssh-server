@@ -90,7 +90,7 @@ final class Packet
 
         // Extract format specifiers using regex to match %s, %u, %b
         preg_match_all('/%([sub])/', $format, $matches);
-        $specifiers = $matches[1] ?? []; // @phpstan-ignore-line
+        $specifiers = $matches[1] ?? [];
 
         foreach ($specifiers as $spec) {
             if ($this->offset >= strlen($this->message)) {

@@ -354,7 +354,7 @@ final class PublicKeyValidator
                     return false;
                 }
 
-                $this->createSshKeyFromComponents($components['modulus'], $components['exponent']);
+                // $this->createSshKeyFromComponents($components['modulus'], $components['exponent']);
 
                 return true;
             }
