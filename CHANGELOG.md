@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+### Changed
+
+  * Upgraded to phpseclib 4 (`phpseclib/phpseclib` `^4.0`), so the server can be installed alongside packages that require it, such as `laravel/socialite` 5.31+. phpseclib 3 is no longer supported.
+
 ## 1.1.0 - 2026-05-11
 
 ### Added

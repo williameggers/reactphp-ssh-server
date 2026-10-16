@@ -24,9 +24,9 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-use phpseclib3\Crypt\Common\PrivateKey;
-use phpseclib3\Crypt\PublicKeyLoader;
-use phpseclib3\Net\SSH2;
+use phpseclib4\Crypt\Common\PrivateKey;
+use phpseclib4\Crypt\PublicKeyLoader;
+use phpseclib4\Net\SSH2;
 
 beforeEach(function (): void {
     // Use a random available port for testing
@@ -44,7 +44,7 @@ beforeEach(function (): void {
         <<<PHP
 <?php
 require '{$autoloadPath}';
-use phpseclib3\\Crypt\\PublicKeyLoader;
+use phpseclib4\\Crypt\\PublicKeyLoader;
 use React\\Promise\\Deferred;
 use WilliamEggers\\React\\SSH\\Channel;
 use WilliamEggers\\React\\SSH\\Connection;
