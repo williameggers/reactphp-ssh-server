@@ -315,6 +315,20 @@ $connection->close();
     });
     ```
 
+* **publickey-query** - emitted when the client asks whether a public key is acceptable, before it signs with it.
+
+    This event is only emitted if authentication is enabled. Without a listener, every supported key is acceptable and only the signed request reaches the **authenticate** event. With a listener, resolve the provided Deferred with ***true*** to let the client sign with the key, or ***false*** to reject it, so the client moves on to its next key without being asked for a signature (or a hardware key touch). The Deferred must be resolved within `Connection->deferredEventPromiseTimeout` seconds or the key is rejected.
+
+    A client may also skip the query and send a signed request directly, so the **authenticate** event must still check the key.
+
+    **Signature:** `function (string $username, string $publicKey, Deferred $acceptable): void`
+
+    ```php
+    $connection->on('publickey-query', function (string $username, string $publicKey, Deferred $acceptable) use ($authorizedKeys) {
+        $acceptable->resolve(in_array($publicKey, $authorizedKeys, true));
+    });
+    ```
+
 * **channel.open** - emitted when the client opens a new channel.
 
     This typically occurs when the client initiates a session (e.g., for executing commands, starting a shell, or setting up port forwarding). Each channel is independent and associated with a specific purpose. Most servers only handle "session" type channels, which are used for shell access and exec commands.

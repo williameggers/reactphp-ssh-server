@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+### Added
+
+  * Added the `publickey-query` connection event, which lets the server decide whether a public key is acceptable before the client signs with it, so clients aren't asked for a signature (or a hardware key touch) for keys that will be rejected.
+
 ## 1.1.0 - 2026-05-11
 
 ### Added
