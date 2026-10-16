@@ -668,6 +668,14 @@ This is often used to interrupt a long-running command or to cancel a session gr
 
     Optionally sends final data, then ends this SSH channel by sending `SSH_MSG_CHANNEL_EOF` followed by `SSH_MSG_CHANNEL_CLOSE`. This affects only the channel, not the underlying SSH connection.
 
+* **exit(int $status, $data = null)**
+
+    Like `end()`, but first reports the exit status of the shell or command to the client with an `exit-status` request ([RFC 4254 section 6.10](https://www.rfc-editor.org/rfc/rfc4254#section-6.10)). Clients such as OpenSSH use it as their own exit code, and exit with 255 when a channel closes without one.
+
+    ```php
+    $channel->exit(0, "Goodbye!\r\n");
+    ```
+
 * **pause(): void**
 
     Pauses reading application data from this channel.
