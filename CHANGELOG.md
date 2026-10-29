@@ -2,6 +2,12 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
+## Unreleased
+
+### Added
+
+  * Added `Channel::exit()`, which ends a channel after sending an `exit-status` request, so clients such as OpenSSH exit with the reported status instead of 255.
+
 ## 1.1.0 - 2026-05-11
 
 ### Added
