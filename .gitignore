@@ -2,3 +2,4 @@
 /vendor/
 /.phpunit.cache/
 .php-cs-fixer.cache
+.devcontainer/devcontainer-lock.json

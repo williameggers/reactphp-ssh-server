@@ -466,6 +466,21 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     }
 
     /**
+     * Sends an "exit-status" SSH_MSG_CHANNEL_REQUEST for a channel if it is still open.
+     *
+     * The request never asks for a reply (RFC 4254 section 6.10).
+     */
+    public function sendExitStatus(Channel $channel, int $status): void
+    {
+        $channelId = $channel->getSenderChannel();
+        if (! isset($this->activeChannelsByLocalId[$channelId]) || $channel->hasSentClose()) {
+            return;
+        }
+
+        $this->writePacked(MessageType::CHANNEL_REQUEST, [$channel->getRecipientChannel(), 'exit-status', false, $status]);
+    }
+
+    /**
      * Sends SSH_MSG_CHANNEL_CLOSE for a channel and marks it locally closed.
      */
     public function closeChannel(Channel $channel): void
@@ -901,13 +916,52 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                 return;
             }
             // Client is checking if the key is acceptable (no signature provided yet)
-            $this->info("Public key provided without signature, sending PK_OK for user: {$username}");
-            if (in_array($keyAlgorithmName, $this->kexNegotiator?->getAcceptedUserKeyAlgorithms() ?? [])) {
-                $this->writePacked(MessageType::USERAUTH_PK_OK, [$keyAlgorithmName, $publicKeyBlob]);
-            } else {
+            if (! in_array($keyAlgorithmName, $this->kexNegotiator?->getAcceptedUserKeyAlgorithms() ?? [])) {
                 $this->warning("Public key algorithm {$keyAlgorithmName} not supported");
                 $this->writePacked(MessageType::USERAUTH_FAILURE, [implode(',', ['publickey', 'none']), false]);
+
+                return;
             }
+
+            // Without a publickey-query listener every supported key is acceptable, and only the signed
+            // request reaches the authenticate event.
+            if ([] === $this->listeners('publickey-query')) {
+                $this->info("Public key provided without signature, sending PK_OK for user: {$username}");
+                $this->writePacked(MessageType::USERAUTH_PK_OK, [$keyAlgorithmName, $publicKeyBlob]);
+
+                return;
+            }
+
+            // No signature has been presented yet, so the blob has not been validated at all. Screen it
+            // before getSshKeyFromBlob() parses it; a malformed blob must be rejected cleanly here rather
+            // than throwing out of packet processing and desyncing the input buffer.
+            if (! $this->publicKeyValidator->validateKeyBlob((string) $publicKeyBlob)) {
+                $this->warning("Malformed public key blob in publickey query for user: {$username}");
+                $this->writePacked(MessageType::USERAUTH_FAILURE, [implode(',', $this->availableAuthMethods()), false]);
+
+                return;
+            }
+
+            $deferred = new Deferred();
+            $this->emit('publickey-query', [(string) $username, $this->publicKeyValidator->getSshKeyFromBlob((string) $publicKeyBlob), $deferred]);
+
+            /** @var PromiseInterface<bool> $queryPromise */
+            $queryPromise = timeout($deferred->promise(), $this->deferredEventPromiseTimeout);
+            $queryPromise->then(
+                function (bool $acceptable) use ($keyAlgorithmName, $publicKeyBlob): void {
+                    if ($acceptable) {
+                        $this->writePacked(MessageType::USERAUTH_PK_OK, [$keyAlgorithmName, $publicKeyBlob]);
+
+                        return;
+                    }
+
+                    $this->writePacked(MessageType::USERAUTH_FAILURE, [implode(',', $this->availableAuthMethods()), false]);
+                }
+            )->catch(
+                function (): void {
+                    $this->writePacked(MessageType::USERAUTH_FAILURE, [implode(',', $this->availableAuthMethods()), false]);
+                }
+            );
 
             return;
         }
@@ -928,6 +982,21 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
             }
             $this->writePacked(MessageType::USERAUTH_FAILURE, [implode(',', $availableAuthMethods), false]);
         }
+    }
+
+    /**
+     * The authentication methods a client may continue with after a rejected attempt.
+     *
+     * @return list<string>
+     */
+    private function availableAuthMethods(): array
+    {
+        // If the keyboard-interactive mode has been configured, it replaces password.
+        return [
+            'publickey',
+            is_null($this->keyboardInteractiveConfig) ? 'password' : 'keyboard-interactive',
+            'none',
+        ];
     }
 
     /**

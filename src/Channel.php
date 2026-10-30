@@ -58,6 +58,7 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
     private bool $requestReplyPending = false;
     private bool $queueEofAfterReply = false;
     private bool $queueCloseAfterReply = false;
+    private ?int $exitStatus = null;
     private bool $paused = false;
 
     /**
@@ -389,6 +390,7 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
 
         if ($this->shouldSendQueuedClose()) {
             $this->queueCloseAfterReply = false;
+            $this->sendExitStatus();
             $this->connection->closeChannel($this);
         }
     }
@@ -513,7 +515,32 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
             $this->eofSent = true;
         }
 
+        $this->sendExitStatus();
         $this->connection->closeChannel($this);
+    }
+
+    /**
+     * Ends this SSH channel like `end()`, but first reports the exit status of the shell or command
+     * to the client with an "exit-status" request (RFC 4254 section 6.10).
+     *
+     * Clients such as OpenSSH use the reported status as their own exit code. Without it, they
+     * cannot tell how the session ended and exit with 255.
+     *
+     * @param int   $status the exit status, between 0 and 4294967295
+     * @param mixed $data   optional final data to send before ending the channel
+     */
+    public function exit(int $status, mixed $data = null): void
+    {
+        if ($status < 0 || $status > 0xFFFFFFFF) {
+            throw new \InvalidArgumentException('Exit status must be between 0 and 4294967295');
+        }
+
+        if ($this->closeSent || $this->closeReceived) {
+            return;
+        }
+
+        $this->exitStatus = $status;
+        $this->end($data);
     }
 
     /**
@@ -630,5 +657,15 @@ final class Channel implements EventEmitterInterface, ReadableStreamInterface, W
                 $this->pendingOutboundBytes
             ));
         }
+    }
+
+    private function sendExitStatus(): void
+    {
+        if (is_null($this->exitStatus)) {
+            return;
+        }
+
+        $this->connection->sendExitStatus($this, $this->exitStatus);
+        $this->exitStatus = null;
     }
 }
