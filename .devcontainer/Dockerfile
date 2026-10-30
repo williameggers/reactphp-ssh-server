@@ -10,7 +10,7 @@ RUN mkdir -p /usr/share/keyrings && \
 
 RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \
     apt-get install -y libffi-dev libuv1-dev && \
-    docker-php-ext-install pcntl && \
+    docker-php-ext-install pcntl ffi && \
     pecl install channel://pecl.php.net/uv-0.3.0 && \
     docker-php-ext-enable uv && \
     apt-get clean -y && rm -rf /var/lib/apt/lists/*

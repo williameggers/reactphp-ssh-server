@@ -11,3 +11,9 @@ parameters:
         - identifier: missingType.iterableValue
         - identifier: method.unused
         - identifier: property.onlyWritten
+
+        # FFI binds its symbols from libcrypto at runtime, so the EVP_* and ERR_* entry points
+        # declared by the ML-KEM backend are invisible to static analysis.
+        -
+            identifier: method.notFound
+            path: src/Crypto/MlKem768OpenSsl.php

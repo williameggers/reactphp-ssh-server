@@ -228,8 +228,9 @@ final class PacketHandler
             $this->rekeyKex = $kex;
         }
 
-        // Pack shared secret as MPInt (confirm no extra leading zeros)
-        $K = $this->packMpint($kex->getSharedSecret());
+        // Classical algorithms encode K as an mpint; the hybrid mlkem768x25519-sha256 exchange
+        // hashes its secrets into a fixed-width value that is encoded as a plain string.
+        $K = $kex->encodedSharedSecret();
         $H = $kex->getExchangeHash();
 
         $kdf_mac = static function (string $letter, int $needed_length) use ($K, $H, $kex): string {
@@ -1045,20 +1046,6 @@ final class PacketHandler
         $paddingLength = ord($plaintext[0]);
 
         return new Packet(substr($plaintext, 1, strlen($plaintext) - $paddingLength - 1));
-    }
-
-    private function packMpint(string $bignum): string
-    {
-        // Remove ALL leading zeros first
-        $bignum = ltrim($bignum, "\0");
-
-        // Add single zero byte only if MSB is set
-        if (strlen($bignum) > 0 && (ord($bignum[0]) & 0x80)) {
-            $bignum = "\0" . $bignum;
-        }
-
-        // Pack length and value
-        return pack('N', strlen($bignum)) . $bignum;
     }
 
     /**
