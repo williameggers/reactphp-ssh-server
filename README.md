@@ -723,6 +723,8 @@ The following key exchange methods are supported:
 
 `mlkem768x25519-sha256` combines the FIPS 203 ML-KEM-768 key encapsulation mechanism with Curve25519 and hashes both secrets into the session key, so the exchange stays protected even if one of the two primitives is later broken. It requires the optional **ext-ffi** extension and an OpenSSL **3.5 or newer** libcrypto, which is where ML-KEM-768 first became available. When either is missing, the method is simply not advertised and clients negotiate one of the classical methods above, so no configuration is needed to keep existing deployments working. Set `REACT_SSH_LIBCRYPTO` to the path of the libcrypto shared object if the usual locations do not hold an ML-KEM capable one.
 
+The cleanest setup is OpenSSL 3.5 or newer installed on the host, so PHP's `openssl` extension and FFI use the same libcrypto. Pointing `REACT_SSH_LIBCRYPTO` at a separate copy also works, because the hybrid exchange only calls the encapsulation entry points, but it does load a second OpenSSL into the process, so prefer a host upgrade where you can.
+
 The hybrid exchange is signed with whichever host key algorithm was negotiated, so it works with `ssh-ed25519` as well as `rsa-sha2-256` and `rsa-sha2-512`.
 
 ### Server host key algorithms

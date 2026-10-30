@@ -61,6 +61,31 @@ final class MlKem768OpenSsl
     private const ALGORITHM = 'ML-KEM-768';
 
     /**
+     * The libcrypto entry points needed to encapsulate a shared secret.
+     *
+     * Declared as a constant so the constructor can wrap the bind call and report failures as
+     * a single exception type.
+     */
+    private const EVP_DECLARATIONS = '
+        typedef struct evp_pkey_st EVP_PKEY;
+        typedef struct evp_pkey_ctx_st EVP_PKEY_CTX;
+        typedef struct ossl_lib_ctx_st OSSL_LIB_CTX;
+
+        EVP_PKEY_CTX *EVP_PKEY_CTX_new_from_name(OSSL_LIB_CTX *libctx, const char *name, const char *propquery);
+        EVP_PKEY *EVP_PKEY_new_raw_public_key_ex(OSSL_LIB_CTX *libctx, const char *keytype, const char *propq, const unsigned char *key, size_t keylen);
+        EVP_PKEY_CTX *EVP_PKEY_CTX_new_from_pkey(OSSL_LIB_CTX *libctx, EVP_PKEY *pkey, const char *propquery);
+
+        int EVP_PKEY_encapsulate_init(EVP_PKEY_CTX *ctx, const void *params);
+        int EVP_PKEY_encapsulate(EVP_PKEY_CTX *ctx, unsigned char *wrappedkey, size_t *wrappedkeylen, unsigned char *genkey, size_t *genkeylen);
+
+        void EVP_PKEY_CTX_free(EVP_PKEY_CTX *ctx);
+        void EVP_PKEY_free(EVP_PKEY *pkey);
+
+        unsigned long ERR_get_error(void);
+        char *ERR_error_string(unsigned long e, char *buf);
+    ';
+
+    /**
      * Memoised availability probe so the FFI handshake runs at most once per process.
      */
     private static ?bool $available = null;
@@ -73,24 +98,13 @@ final class MlKem768OpenSsl
             throw new \RuntimeException('FFI extension not loaded.');
         }
 
-        $this->ffi = \FFI::cdef('
-            typedef struct evp_pkey_st EVP_PKEY;
-            typedef struct evp_pkey_ctx_st EVP_PKEY_CTX;
-            typedef struct ossl_lib_ctx_st OSSL_LIB_CTX;
-
-            EVP_PKEY_CTX *EVP_PKEY_CTX_new_from_name(OSSL_LIB_CTX *libctx, const char *name, const char *propquery);
-            EVP_PKEY *EVP_PKEY_new_raw_public_key_ex(OSSL_LIB_CTX *libctx, const char *keytype, const char *propq, const unsigned char *key, size_t keylen);
-            EVP_PKEY_CTX *EVP_PKEY_CTX_new_from_pkey(OSSL_LIB_CTX *libctx, EVP_PKEY *pkey, const char *propquery);
-
-            int EVP_PKEY_encapsulate_init(EVP_PKEY_CTX *ctx, const void *params);
-            int EVP_PKEY_encapsulate(EVP_PKEY_CTX *ctx, unsigned char *wrappedkey, size_t *wrappedkeylen, unsigned char *genkey, size_t *genkeylen);
-
-            void EVP_PKEY_CTX_free(EVP_PKEY_CTX *ctx);
-            void EVP_PKEY_free(EVP_PKEY *pkey);
-
-            unsigned long ERR_get_error(void);
-            char *ERR_error_string(unsigned long e, char *buf);
-        ', $this->libcrypto());
+        try {
+            $this->ffi = \FFI::cdef(self::EVP_DECLARATIONS, $this->libcrypto());
+        } catch (\Throwable $e) {
+            // Bind failures are operational configuration problems, so surface them as the
+            // documented RuntimeException with the underlying reason attached.
+            throw new \RuntimeException('Could not bind the ML-KEM-768 EVP API: ' . $e->getMessage(), 0, $e);
+        }
     }
 
     /**
@@ -284,11 +298,26 @@ final class MlKem768OpenSsl
      * PHP's openssl extension may be compiled against a different libcrypto than the one
      * FFI would pick up by default, so REACT_SSH_LIBCRYPTO lets an operator point at the
      * exact shared object that provides ML-KEM-768.
+     *
+     * @throws \RuntimeException if the configured or discoverable libcrypto cannot be loaded
      */
     private function libcrypto(): string
     {
         $configured = getenv('REACT_SSH_LIBCRYPTO');
         if (is_string($configured) && '' !== $configured) {
+            // Validate the operator-supplied path up front. Otherwise a typo surfaces as an
+            // opaque FFI error from the real declarations below, with no hint of which
+            // setting was wrong.
+            try {
+                \FFI::cdef('unsigned long OpenSSL_version_num(void);', $configured);
+            } catch (\Throwable $e) {
+                throw new \RuntimeException(
+                    'Could not load libcrypto from REACT_SSH_LIBCRYPTO="' . $configured . '": ' . $e->getMessage(),
+                    0,
+                    $e,
+                );
+            }
+
             return $configured;
         }
 
