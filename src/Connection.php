@@ -466,6 +466,21 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
     }
 
     /**
+     * Sends an "exit-status" SSH_MSG_CHANNEL_REQUEST for a channel if it is still open.
+     *
+     * The request never asks for a reply (RFC 4254 section 6.10).
+     */
+    public function sendExitStatus(Channel $channel, int $status): void
+    {
+        $channelId = $channel->getSenderChannel();
+        if (! isset($this->activeChannelsByLocalId[$channelId]) || $channel->hasSentClose()) {
+            return;
+        }
+
+        $this->writePacked(MessageType::CHANNEL_REQUEST, [$channel->getRecipientChannel(), 'exit-status', false, $status]);
+    }
+
+    /**
      * Sends SSH_MSG_CHANNEL_CLOSE for a channel and marks it locally closed.
      */
     public function closeChannel(Channel $channel): void
