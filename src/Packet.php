@@ -46,9 +46,17 @@ final class Packet
      * Extracts a string from the message payload.
      *
      * @return array{0: string, 1: int}
+     *
+     * @throws \UnexpectedValueException If the length prefix or string data is incomplete
      */
     public function extractString(string $data, int &$offset): array
     {
+        // Validate bounds before reading so a truncated or lying length prefix cannot silently
+        // return a short string and advance the offset past the end of the buffer.
+        if (strlen($data) - $offset < 4) {
+            throw new \UnexpectedValueException('Incomplete SSH string length');
+        }
+
         $unpackResult = unpack('N', substr($data, $offset, 4));
         if (false === $unpackResult) {
             throw new \RuntimeException('Failure determining packetLength');
@@ -57,6 +65,11 @@ final class Packet
             throw new \UnexpectedValueException('Expected int-castable value at offset 1');
         }
         $length = (int) $unpackResult[1];
+
+        if ($length > strlen($data) - $offset - 4) {
+            throw new \UnexpectedValueException('Incomplete SSH string data');
+        }
+
         $string = substr($data, $offset + 4, $length);
         $offset += 4 + $length;
 
@@ -73,6 +86,8 @@ final class Packet
      * @param string $format Format string like '%s%u%u%u' for string + 3 integers
      *
      * @return array<int, bool|int|string> Array of extracted values
+     *
+     * @throws \UnexpectedValueException If the message is too short for a required field
      */
     public function extractFormat(string $format): array
     {
@@ -93,8 +108,13 @@ final class Packet
         $specifiers = $matches[1] ?? [];
 
         foreach ($specifiers as $spec) {
-            if ($this->offset >= strlen($this->message)) {
-                return $values;
+            $remaining = strlen($this->message) - $this->offset;
+            if (0 === $remaining) {
+                throw new \UnexpectedValueException("Missing SSH field for %{$spec}");
+            }
+
+            if ('u' === $spec && $remaining < 4) {
+                throw new \UnexpectedValueException('Incomplete SSH uint32 field');
             }
 
             switch ($spec) {
@@ -104,11 +124,11 @@ final class Packet
                     break;
 
                 case 'u':
-                    $value = (unpack('N', substr($this->message, $this->offset, 4)) ?: [0])[1] ?? 0;
+                    $value = (unpack('N', substr($this->message, $this->offset, 4)) ?: [])[1] ?? null;
                     if (! is_int($value)) {
                         throw new \RuntimeException('Unable to unpack 4-byte unsigned int.');
                     }
-                    $values[] = (int) $value;
+                    $values[] = $value;
                     $this->offset += 4;
 
                     break;
