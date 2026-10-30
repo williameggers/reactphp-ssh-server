@@ -113,6 +113,37 @@ test('unsupported key algorithms are rejected without asking the listener', func
     expect(writtenMessageTypes($transport))->toBe([MessageType::USERAUTH_FAILURE]);
 });
 
+test('a malformed public key blob rejects the query without reaching the listener', function (): void {
+    [$connection, $transport] = connectionForPublicKeyQueryTests();
+    $asked = false;
+
+    $connection->on('publickey-query', function () use (&$asked): void {
+        $asked = true;
+    });
+
+    // Declares a 200-byte key body but only provides 8 bytes, so the blob cannot be parsed.
+    queryPublicKey($connection, pack('N', 11) . 'ssh-ed25519' . pack('N', 200) . random_bytes(8));
+
+    expect($asked)->toBeFalse();
+    expect(writtenMessageTypes($transport))->toBe([MessageType::USERAUTH_FAILURE]);
+    expect(Packet::fromData($transport->getWrites()[0])->extractFormat('%s%b'))->toBe(['publickey,password,none', false]);
+});
+
+test('a blob holding a key type the server cannot verify is rejected at the query', function (): void {
+    [$connection, $transport] = connectionForPublicKeyQueryTests();
+    $asked = false;
+
+    $connection->on('publickey-query', function () use (&$asked): void {
+        $asked = true;
+    });
+
+    // Structurally valid blob, but its inner key type is ssh-dss while the request claims ssh-ed25519.
+    queryPublicKey($connection, pack('N', 7) . 'ssh-dss' . pack('N', 20) . random_bytes(20));
+
+    expect($asked)->toBeFalse();
+    expect(writtenMessageTypes($transport))->toBe([MessageType::USERAUTH_FAILURE]);
+});
+
 /**
  * @return array{Connection, InMemoryConnection}
  */

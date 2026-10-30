@@ -932,6 +932,16 @@ final class Connection implements ConnectionInterface, EventEmitterInterface
                 return;
             }
 
+            // No signature has been presented yet, so the blob has not been validated at all. Screen it
+            // before getSshKeyFromBlob() parses it; a malformed blob must be rejected cleanly here rather
+            // than throwing out of packet processing and desyncing the input buffer.
+            if (! $this->publicKeyValidator->validateKeyBlob((string) $publicKeyBlob)) {
+                $this->warning("Malformed public key blob in publickey query for user: {$username}");
+                $this->writePacked(MessageType::USERAUTH_FAILURE, [implode(',', $this->availableAuthMethods()), false]);
+
+                return;
+            }
+
             $deferred = new Deferred();
             $this->emit('publickey-query', [(string) $username, $this->publicKeyValidator->getSshKeyFromBlob((string) $publicKeyBlob), $deferred]);
 
