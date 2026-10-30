@@ -251,13 +251,27 @@ final class MlKem768OpenSsl
 
     /**
      * Allocates a raw buffer in the FFI scope.
-     *
-     * @throws \RuntimeException if libcrypto cannot provide the buffer
      */
     private function allocate(string $cType): CData
     {
-        $buffer = $this->ffi->new($cType);
-        if (! $buffer instanceof CData) {
+        // Whether FFI::new() is stubbed as nullable differs between PHP versions, so the
+        // allocation is checked by a helper whose parameter is explicitly nullable. That keeps
+        // the fail-fast check valid on every supported version rather than version-specific.
+        return $this->requireBuffer($this->ffi->new($cType), $cType);
+    }
+
+    /**
+     * Fails fast when libcrypto cannot provide the requested buffer.
+     *
+     * @param null|CData $buffer the freshly allocated buffer, or null if libcrypto refused it
+     *
+     * @return CData the buffer
+     *
+     * @throws \RuntimeException if the allocation returned no buffer
+     */
+    private function requireBuffer(?CData $buffer, string $cType): CData
+    {
+        if (null === $buffer) {
             throw new \RuntimeException('Could not allocate FFI buffer: ' . $cType);
         }
 
