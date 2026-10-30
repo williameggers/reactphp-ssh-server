@@ -9,6 +9,10 @@ This project adheres to [Semantic Versioning](http://semver.org/).
   * Added the `publickey-query` connection event, which lets the server decide whether a public key is acceptable before the client signs with it, so clients aren't asked for a signature (or a hardware key touch) for keys that will be rejected.
   * Added `Channel::exit()`, which ends a channel after sending an `exit-status` request, so clients such as OpenSSH exit with the reported status instead of 255.
 
+### Fixed
+
+  * A malformed public key blob in a `publickey-query` probe is now rejected with `USERAUTH_FAILURE` instead of throwing out of packet processing and corrupting the connection's input stream.
+
 ## 1.1.0 - 2026-05-11
 
 ### Added
