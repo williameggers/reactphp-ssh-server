@@ -45,7 +45,7 @@ final class Server extends EventEmitter implements ServerInterface
      *
      * This value is used in the server identification string during the SSH handshake.
      */
-    public const VERSION = '1.1.0';
+    public const VERSION = '1.1.2';
 
     /**
      * Server host keys for SSH identity.

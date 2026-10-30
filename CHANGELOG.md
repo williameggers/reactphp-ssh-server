@@ -2,7 +2,7 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
-## Unreleased
+## 1.1.2 - 2026-08-30
 
 ### Added
 
@@ -12,6 +12,12 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 ### Fixed
 
   * A malformed public key blob in a `publickey-query` probe is now rejected with `USERAUTH_FAILURE` instead of throwing out of packet processing and corrupting the connection's input stream.
+
+## 1.1.1 - 2026-09-29
+
+### Fixed
+
+  * Fix host key loading on Windows by @champix in #4
 
 ## 1.1.0 - 2026-05-11
 
