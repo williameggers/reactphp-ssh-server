@@ -8,6 +8,7 @@ Guidance for coding agents working in `/workspaces/reactphp-ssh-server`.
 - Source: `src/`. Tests: `tests/`. Examples: `examples/`.
 - Minimum PHP `8.2`.
 - Required extensions: `mbstring`, `openssl`, `sodium`; dev/test also needs `pcntl`.
+- Optional: `ffi` enables the post-quantum `mlkem768x25519-sha256` key exchange, provided the host's libcrypto supports ML-KEM-768; the feature soft-disables without it.
 - CI runs on PHP `8.2`, `8.3`, `8.4`.
 
 ## Existing Rule Files

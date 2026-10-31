@@ -4,6 +4,10 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## Unreleased
 
+### Added
+
+  * Added the post-quantum hybrid key exchange method `mlkem768x25519-sha256`, which encapsulates a shared secret to the client's ML-KEM-768 key, combines it with a classical Curve25519 agreement, and hashes both into the session key so the exchange stays protected even if one of the two primitives is later broken. The method is advertised only when the host can actually perform it, which requires the optional `ffi` extension and an OpenSSL 3.5 or newer libcrypto; without them the server negotiates `curve25519-sha256` exactly as before, so no configuration is needed to keep existing deployments working. `REACT_SSH_LIBCRYPTO` selects the libcrypto shared object when the usual locations do not hold an ML-KEM capable one. Ported from upstream WhispPHP/whisp 3.0.0.
+
 ### Fixed
 
   * Malformed SSH packets are now rejected during field extraction instead of being silently mis-parsed. `Packet::extractString()` validates the 4-byte length prefix and that the declared string fits in the remaining payload, and `Packet::extractFormat()` throws when a required field is missing or a `uint32` is truncated, rather than returning partial results or a fabricated zero. Previously a truncated packet could feed `null` into typed protocol handlers and raise an uncatchable `TypeError` inside the event loop, or route a mis-parsed channel id or window-adjust amount to the wrong channel. Ported from upstream WhispPHP/whisp 3.0.2.
