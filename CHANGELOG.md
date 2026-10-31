@@ -2,7 +2,7 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
-## 1.2.0 - 2026-08-31
+## 1.2.0 - 2026-10-31
 
 ### Added
 
@@ -12,7 +12,7 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
   * Malformed SSH packets are now rejected during field extraction instead of being silently mis-parsed. `Packet::extractString()` validates the 4-byte length prefix and that the declared string fits in the remaining payload, and `Packet::extractFormat()` throws when a required field is missing or a `uint32` is truncated, rather than returning partial results or a fabricated zero. Previously a truncated packet could feed `null` into typed protocol handlers and raise an uncatchable `TypeError` inside the event loop, or route a mis-parsed channel id or window-adjust amount to the wrong channel. Ported from upstream WhispPHP/whisp 3.0.2.
 
-## 1.1.2 - 2026-08-30
+## 1.1.2 - 2026-10-30
 
 ### Added
 
