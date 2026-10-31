@@ -1,6 +1,9 @@
+/.devcontainer/ export-ignore
 /.gitattributes export-ignore
-/.github/workflows/ export-ignore
+/.github/ export-ignore
 /.gitignore export-ignore
+/.php-cs-fixer.php export-ignore
+/AGENTS.md export-ignore
 /examples/ export-ignore
 /phpstan.neon.dist export-ignore
 /phpunit.xml.dist export-ignore
