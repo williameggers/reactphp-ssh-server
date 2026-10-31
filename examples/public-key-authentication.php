@@ -26,7 +26,7 @@
 
 require __DIR__ . '/../vendor/autoload.php';
 
-use phpseclib3\Crypt\PublicKeyLoader;
+use phpseclib4\Crypt\PublicKeyLoader;
 use React\Promise\Deferred;
 use WilliamEggers\React\SSH\Channel;
 use WilliamEggers\React\SSH\Connection;

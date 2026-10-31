@@ -26,8 +26,8 @@
 
 namespace WilliamEggers\React\SSH;
 
-use phpseclib3\Crypt\AES;
-use phpseclib3\Crypt\Hash;
+use phpseclib4\Crypt\AES;
+use phpseclib4\Crypt\Hash;
 use React\Socket\ConnectionInterface;
 use WilliamEggers\React\SSH\Concerns\WritesLogs;
 use WilliamEggers\React\SSH\Enums\MessageType;
@@ -1050,7 +1050,7 @@ final class PacketHandler
 
     /**
      * Maps an encryption algorithm name to an instance of a subclass of
-     * \phpseclib3\Crypt\Hash.
+     * \phpseclib4\Crypt\Hash.
      *
      * @param string $algorithm Name of the encryption algorithm
      *

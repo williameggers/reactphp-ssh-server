@@ -4,6 +4,10 @@ This project adheres to [Semantic Versioning](http://semver.org/).
 
 ## 1.2.0 - 2026-10-31
 
+### Changed
+
+  * Upgraded to phpseclib 4 (`phpseclib/phpseclib` `^4.0`), so the server can be installed alongside packages that require it.
+
 ### Added
 
   * Added the post-quantum hybrid key exchange method `mlkem768x25519-sha256`, which encapsulates a shared secret to the client's ML-KEM-768 key, combines it with a classical Curve25519 agreement, and hashes both into the session key so the exchange stays protected even if one of the two primitives is later broken. The method is advertised only when the host can actually perform it, which requires the optional `ffi` extension and an OpenSSL 3.5 or newer libcrypto; without them the server negotiates `curve25519-sha256` exactly as before, so no configuration is needed to keep existing deployments working. `REACT_SSH_LIBCRYPTO` selects the libcrypto shared object when the usual locations do not hold an ML-KEM capable one. Ported from upstream WhispPHP/whisp 3.0.0.

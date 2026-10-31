@@ -26,7 +26,7 @@
 
 namespace WilliamEggers\React\SSH;
 
-use phpseclib3\Crypt\DH;
+use phpseclib4\Crypt\DH;
 use Psr\Log\LoggerInterface;
 use WilliamEggers\React\SSH\Crypto\MlKem768OpenSsl;
 use WilliamEggers\React\SSH\Enums\MessageType;
@@ -175,7 +175,7 @@ final class Kex
                 break;
 
             case 'diffie-hellman-group14-sha256':
-                $dhParameters = DH::createParameters($kexAlgorithm);
+                $dhParameters = DH::createParameters('diffie-hellman-group14-sha256');
                 $dhPrivate = DH::createKey($dhParameters);
                 $dhPublic = $dhPrivate->getPublicKey();
                 $ephemeralPublic = $dhPublic->toBigInteger()->toBytes(true);

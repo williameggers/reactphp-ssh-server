@@ -24,8 +24,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-use phpseclib3\Crypt\EC;
-use phpseclib3\Crypt\RSA;
+use phpseclib4\Crypt\EC;
+use phpseclib4\Crypt\RSA;
 
 /*
 |--------------------------------------------------------------------------

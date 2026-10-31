@@ -24,7 +24,7 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-use phpseclib3\Net\SSH2;
+use phpseclib4\Net\SSH2;
 
 beforeEach(function (): void {
     $this->port = random_int(49152, 65535);

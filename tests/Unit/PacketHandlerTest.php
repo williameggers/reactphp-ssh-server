@@ -24,8 +24,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-use phpseclib3\Crypt\AES;
-use phpseclib3\Crypt\Hash;
+use phpseclib4\Crypt\AES;
+use phpseclib4\Crypt\Hash;
 use WilliamEggers\React\SSH\Enums\MessageType;
 use WilliamEggers\React\SSH\Packet;
 use WilliamEggers\React\SSH\PacketHandler;

@@ -26,8 +26,8 @@
 
 namespace WilliamEggers\React\SSH;
 
-use phpseclib3\Crypt\PublicKeyLoader;
-use phpseclib3\Math\BigInteger;
+use phpseclib4\Crypt\PublicKeyLoader;
+use phpseclib4\Math\BigInteger;
 use Psr\Log\LoggerInterface;
 use WilliamEggers\React\SSH\Concerns\WritesLogs;
 use WilliamEggers\React\SSH\Loggers\NullLogger;
@@ -515,25 +515,7 @@ final class PublicKeyValidator
             ]);
 
             // Export as PEM (PKCS8 format)
-            $pemResult = $key->toString('PKCS8');
-            if (is_string($pemResult)) {
-                return $pemResult;
-            }
-
-            if (is_array($pemResult)) {
-                $pemParts = [];
-                foreach ($pemResult as $pemPart) {
-                    if (! is_string($pemPart)) {
-                        throw new \UnexpectedValueException('Expected PEM export parts to be strings');
-                    }
-
-                    $pemParts[] = $pemPart;
-                }
-
-                return implode('', $pemParts);
-            }
-
-            throw new \UnexpectedValueException('Unexpected PEM export type');
+            return $key->toString('PKCS8');
         } catch (\Exception $e) {
             $this->error('Failed to create PEM from components: ' . $e->getMessage());
 
