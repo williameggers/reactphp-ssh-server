@@ -26,6 +26,7 @@
 
 namespace WilliamEggers\React\SSH;
 
+use WilliamEggers\React\SSH\Crypto\MlKem768OpenSsl;
 use WilliamEggers\React\SSH\Enums\MessageType;
 
 final class KexNegotiator
@@ -48,13 +49,12 @@ final class KexNegotiator
         'rsa-sha2-512',
     ];
 
-    /** @var list<string> */
-    private array $kexAlgorithms = [
-        'curve25519-sha256',                 // Most modern and recommended
-        'curve25519-sha256@libssh.org',      // Same as above but with older OpenSSH compatibility tag
-        'diffie-hellman-group14-sha256',     // Legacy-safe fallback with stronger hash
-        // 'ecdh-sha2-nistp256',             // Widely supported backup; not implemented yet
-    ];
+    /**
+     * Server preference order for key exchange methods, built by availableKexAlgorithms().
+     *
+     * @var list<string>
+     */
+    private array $kexAlgorithms;
 
     /** @var list<string> */
     private array $serverHostKeyAlgorithms = [
@@ -93,6 +93,8 @@ final class KexNegotiator
         public readonly string $serverVersion,
         public ?Packet $packet = null
     ) {
+        $this->kexAlgorithms = $this->availableKexAlgorithms();
+
         if (! is_null($packet)) {
             $this->setClientKexInit($packet);
         }
@@ -285,5 +287,32 @@ final class KexNegotiator
         }
 
         throw new \RuntimeException('No common algorithm found for ' . $label . '. Client supported values: ' . implode(',', $clientList));
+    }
+
+    /**
+     * Builds the server's key exchange preference list.
+     *
+     * The post-quantum hybrid method is offered first, but only when the host's libcrypto
+     * actually provides ML-KEM-768. Environments without ext-ffi, or with an OpenSSL that
+     * predates ML-KEM support, advertise the classical methods alone and need no
+     * configuration to stay working.
+     *
+     * @return list<string>
+     */
+    private function availableKexAlgorithms(): array
+    {
+        $algorithms = [];
+
+        if (MlKem768OpenSsl::isAvailable()) {
+            $algorithms[] = Kex::KEX_MLKEM768X25519_SHA256;  // Post-quantum hybrid; requires ML-KEM-768 in libcrypto
+        }
+
+        $algorithms[] = Kex::KEX_CURVE25519_SHA256;           // Most modern classical method
+        $algorithms[] = 'curve25519-sha256@libssh.org';       // Same as above but with older OpenSSH compatibility tag
+        $algorithms[] = 'diffie-hellman-group14-sha256';      // Legacy-safe fallback with stronger hash
+
+        // 'ecdh-sha2-nistp256' remains unimplemented.
+
+        return $algorithms;
     }
 }

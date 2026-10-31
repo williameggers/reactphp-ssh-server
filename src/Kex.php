@@ -28,14 +28,40 @@ namespace WilliamEggers\React\SSH;
 
 use phpseclib4\Crypt\DH;
 use Psr\Log\LoggerInterface;
+use WilliamEggers\React\SSH\Crypto\MlKem768OpenSsl;
 use WilliamEggers\React\SSH\Enums\MessageType;
 use WilliamEggers\React\SSH\Loggers\NullLogger;
 
 final class Kex
 {
+    /**
+     * The classical Curve25519 key exchange method.
+     */
+    public const KEX_CURVE25519_SHA256 = 'curve25519-sha256';
+
+    /**
+     * The post-quantum hybrid key exchange method: ML-KEM-768 combined with Curve25519.
+     */
+    public const KEX_MLKEM768X25519_SHA256 = 'mlkem768x25519-sha256';
+
+    /**
+     * Byte length of a Curve25519 key exchange public key.
+     */
+    private const CURVE25519_PUBLIC_KEY_BYTES = 32;
+
     private ?string $sessionId = null;
     private string $exchangeHash;
     private string $sharedSecret;
+
+    /**
+     * Whether the shared secret must be encoded as an SSH string rather than an mpint.
+     *
+     * Classical algorithms agree on an integer, which SSH encodes as an mpint. The hybrid
+     * exchange hashes its two secrets together, producing a fixed-width opaque value that
+     * is encoded as a plain string.
+     */
+    private bool $sharedSecretIsString = false;
+
     private readonly LoggerInterface $logger;
 
     public function __construct(
@@ -65,7 +91,11 @@ final class Kex
      *
      * This value is the result of the Diffie-Hellman or elliptic-curve key
      * agreement algorithm and is used in conjunction with the exchange hash to
-     * derive encryption and MAC keys.
+     * derive encryption and MAC keys. The hybrid mlkem768x25519-sha256 exchange
+     * instead returns the hash of its ML-KEM and Curve25519 secrets.
+     *
+     * Callers deriving session keys should use encodedSharedSecret(), which applies the
+     * encoding the negotiated algorithm requires.
      *
      * @return string the shared secret as a binary string
      */
@@ -115,6 +145,14 @@ final class Kex
      */
     public function response(): string
     {
+        $kexAlgorithm = $this->kexNegotiator->getNegotiatedAlgorithm('kex');
+
+        // The hybrid post-quantum exchange has a different client payload layout and encodes
+        // the shared secret differently, so it is handled on its own path.
+        if (self::KEX_MLKEM768X25519_SHA256 === $kexAlgorithm) {
+            return $this->mlKem768X25519Response();
+        }
+
         // Extract client's public key (32 bytes after 4-byte length)
         $clientPublicKeyLength = (unpack('N', substr($this->packet->message, 0, 4)) ?: [])[1] ?? null;
         if (is_null($clientPublicKeyLength)) {
@@ -124,8 +162,6 @@ final class Kex
             throw new \UnexpectedValueException('Expected int-castable value at offset 1');
         }
         $clientPublicKey = substr($this->packet->message, 4, (int) $clientPublicKeyLength);
-
-        $kexAlgorithm = $this->kexNegotiator->getNegotiatedAlgorithm('kex');
 
         switch ($kexAlgorithm) {
             case 'curve25519-sha256':
@@ -151,41 +187,7 @@ final class Kex
         }
 
         // Use the persistent host key instead of generating a new one
-        switch ($this->serverHostKey->getHostKeyAlgorithm()) {
-            case 'ed25519':
-                $ed25519Public = $this->serverHostKey->getPublicKey();
-                if (empty($ed25519Public)) {
-                    throw new \RuntimeException('Invalid server public key');
-                }
-
-                // Format the host key blob
-                $hostKeyBlob = $this->packString('ssh-ed25519') . $this->packString($ed25519Public);
-
-                break;
-
-            case 'rsa':
-                $keyDetails = openssl_pkey_get_details(
-                    $this->serverHostKey->getOpensslPublicKey()
-                ) ?: throw new \RuntimeException('Failure reading RSA public key');
-
-                /**
-                 * @var array $rsaPublicKey
-                 */
-                $rsaPublicKey = $keyDetails['rsa'];
-                $n = $rsaPublicKey['n'];
-                $e = $rsaPublicKey['e'];
-
-                if (! is_string($e) || ! is_string($n)) {
-                    throw new \UnexpectedValueException('RSA key components must be strings');
-                }
-
-                $hostKeyBlob = $this->packString('ssh-rsa') . $this->packMpint($e) . $this->packMpint($n);
-
-                break;
-
-            default:
-                throw new \RuntimeException('Unhandled server host key algorithm: ' . $this->serverHostKey->getHostKeyAlgorithm());
-        }
+        $hostKeyBlob = $this->hostKeyBlob();
 
         // Compute shared secret
         switch ($kexAlgorithm) {
@@ -231,6 +233,186 @@ final class Kex
             $this->sessionId = $exchangeHash;
         }
 
+        $signatureBlob = $this->signExchangeHash($exchangeHash);
+
+        $this->logger->debug('Key exchange details:' . json_encode([
+            'host_key_blob_len' => strlen($hostKeyBlob),
+            'host_key_public' => $this->serverHostKey->getHostKeyAlgorithm(),
+            'signature_blob_len' => strlen($signatureBlob),
+            'exchange_hash' => bin2hex($exchangeHash),
+        ]));
+
+        // Construct KEX_ECDH_REPLY
+        $kexReplyPayload
+            = MessageType::chr(MessageType::KEXDH_REPLY)
+            . $this->packString($hostKeyBlob)       // Host key blob (includes identifier)
+            . $this->packString($ephemeralPublic)   // Server's ephemeral public key
+            . $this->packString($signatureBlob);    // Signature blob (includes identifier)
+
+        $this->exchangeHash = $exchangeHash;
+
+        return $kexReplyPayload;
+    }
+
+    /**
+     * Returns the shared secret (K) in the wire encoding the negotiated algorithm requires.
+     *
+     * Classical algorithms agree on a large integer, which SSH transmits and hashes as an
+     * mpint. The hybrid mlkem768x25519-sha256 exchange hashes its two component secrets into
+     * a fixed-width opaque value, which is encoded as a plain length-prefixed string instead.
+     *
+     * Key derivation must use this method rather than packing getSharedSecret() directly, or
+     * the derived session keys will not match the client's.
+     *
+     * @return string the encoded shared secret
+     */
+    public function encodedSharedSecret(): string
+    {
+        return $this->sharedSecretIsString
+            ? $this->packString($this->sharedSecret)
+            : $this->packMpint($this->sharedSecret);
+    }
+
+    /**
+     * Post-quantum hybrid key exchange response for mlkem768x25519-sha256.
+     *
+     * The client sends one blob containing its ML-KEM-768 encapsulation key followed by its
+     * Curve25519 public key. The server encapsulates a shared secret to the ML-KEM key, runs
+     * the classical Curve25519 agreement, and hashes both secrets together, so the session
+     * keys stay protected even if one of the two primitives is later broken.
+     *
+     * @throws \UnexpectedValueException if the client payload is not exactly one hybrid blob
+     * @throws \RuntimeException         if libcrypto cannot encapsulate to the client's ML-KEM key
+     */
+    private function mlKem768X25519Response(): string
+    {
+        $offset = 0;
+
+        // The client's contribution is a single string: ML-KEM-768 public key, then Curve25519 public key.
+        [$clientBlob] = $this->packet->extractString($this->packet->message, $offset);
+
+        $expectedClientBlobLength = MlKem768OpenSsl::PUBLIC_KEY_BYTES + self::CURVE25519_PUBLIC_KEY_BYTES;
+        if (strlen($clientBlob) !== $expectedClientBlobLength) {
+            throw new \UnexpectedValueException(
+                'Invalid mlkem768x25519-sha256 client key exchange payload: expected '
+                . $expectedClientBlobLength . ' bytes, got ' . strlen($clientBlob),
+            );
+        }
+
+        $clientMlKemPublicKey = substr($clientBlob, 0, MlKem768OpenSsl::PUBLIC_KEY_BYTES);
+        $clientCurve25519PublicKey = substr($clientBlob, MlKem768OpenSsl::PUBLIC_KEY_BYTES, self::CURVE25519_PUBLIC_KEY_BYTES);
+
+        $encapsulation = MlKem768OpenSsl::create()->encapsulate($clientMlKemPublicKey);
+
+        $curveKeyPair = sodium_crypto_box_keypair();
+        $curve25519Private = sodium_crypto_box_secretkey($curveKeyPair);
+        $curve25519Public = sodium_crypto_box_publickey($curveKeyPair);
+        $curve25519SharedSecret = sodium_crypto_scalarmult($curve25519Private, $clientCurve25519PublicKey);
+
+        // The server's reply blob mirrors the client's: ML-KEM ciphertext, then Curve25519 public key.
+        $serverBlob = $encapsulation['ciphertext'] . $curve25519Public;
+
+        $this->sharedSecret = hash('sha256', $encapsulation['sharedSecret'] . $curve25519SharedSecret, true);
+        $this->sharedSecretIsString = true;
+
+        $hostKeyBlob = $this->hostKeyBlob();
+
+        $exchangeHash = hash('sha256', implode('', [
+            $this->packString($this->kexNegotiator->clientVersion),
+            $this->packString($this->kexNegotiator->serverVersion),
+            $this->packString((string) $this->kexNegotiator->clientKexInit), // Client's KEXINIT
+            $this->packString((string) $this->kexNegotiator->serverKexInit), // Our KEXINIT
+            $this->packString($hostKeyBlob),                                 // Host key blob
+            $this->packString($clientBlob),                                  // Client's hybrid key blob
+            $this->packString($serverBlob),                                  // Our hybrid key blob
+            $this->packString($this->sharedSecret),                          // Shared secret, as a string
+        ]), true);
+
+        // Store session ID if this is first key exchange
+        if (is_null($this->sessionId)) {
+            $this->sessionId = $exchangeHash;
+        }
+
+        $signatureBlob = $this->signExchangeHash($exchangeHash);
+
+        $this->logger->debug('Hybrid key exchange details:' . json_encode([
+            'algorithm' => self::KEX_MLKEM768X25519_SHA256,
+            'host_key_blob_len' => strlen($hostKeyBlob),
+            'client_blob_len' => strlen($clientBlob),
+            'server_blob_len' => strlen($serverBlob),
+            'signature_blob_len' => strlen($signatureBlob),
+            'exchange_hash' => bin2hex($exchangeHash),
+        ]));
+
+        // Construct KEX_ECDH_REPLY
+        $kexReplyPayload
+            = MessageType::chr(MessageType::KEXDH_REPLY)
+            . $this->packString($hostKeyBlob)       // Host key blob (includes identifier)
+            . $this->packString($serverBlob)        // Server's hybrid ephemeral key material
+            . $this->packString($signatureBlob);    // Signature blob (includes identifier)
+
+        $this->exchangeHash = $exchangeHash;
+
+        return $kexReplyPayload;
+    }
+
+    /**
+     * Builds the host key blob advertised in the key exchange reply.
+     *
+     * This is the blob the client verifies against its known_hosts entry. Its layout depends
+     * on the key type: Ed25519 carries one raw public key, while RSA carries the exponent and
+     * modulus as mpints.
+     *
+     * @return string the encoded host key blob
+     *
+     * @throws \RuntimeException if the host key algorithm is unsupported
+     */
+    private function hostKeyBlob(): string
+    {
+        switch ($this->serverHostKey->getHostKeyAlgorithm()) {
+            case 'ed25519':
+                $ed25519Public = $this->serverHostKey->getPublicKey();
+                if (empty($ed25519Public)) {
+                    throw new \RuntimeException('Invalid server public key');
+                }
+
+                // Format the host key blob
+                return $this->packString('ssh-ed25519') . $this->packString($ed25519Public);
+
+            case 'rsa':
+                $keyDetails = openssl_pkey_get_details(
+                    $this->serverHostKey->getOpensslPublicKey()
+                ) ?: throw new \RuntimeException('Failure reading RSA public key');
+
+                /**
+                 * @var array $rsaPublicKey
+                 */
+                $rsaPublicKey = $keyDetails['rsa'];
+                $n = $rsaPublicKey['n'];
+                $e = $rsaPublicKey['e'];
+
+                if (! is_string($e) || ! is_string($n)) {
+                    throw new \UnexpectedValueException('RSA key components must be strings');
+                }
+
+                return $this->packString('ssh-rsa') . $this->packMpint($e) . $this->packMpint($n);
+
+            default:
+                throw new \RuntimeException('Unhandled server host key algorithm: ' . $this->serverHostKey->getHostKeyAlgorithm());
+        }
+    }
+
+    /**
+     * Signs a key exchange hash with the negotiated server host key.
+     *
+     * @param string $exchangeHash the exchange hash (H) to sign
+     *
+     * @return string the signature blob: the signature algorithm name followed by the raw signature
+     *
+     * @throws \RuntimeException if the negotiated host key algorithm is unsupported
+     */
+    private function signExchangeHash(string $exchangeHash): string
+    {
         $serverHostKeyAlgorithm = $this->kexNegotiator->negotiateAlgorithms()['hostkey'];
 
         switch ($serverHostKeyAlgorithm) {
@@ -241,9 +423,8 @@ final class Kex
                 }
 
                 $signature = sodium_crypto_sign_detached($exchangeHash, $ed25519Private);
-                $signatureBlob = $this->packString('ssh-ed25519') . $this->packString($signature);
 
-                break;
+                return $this->packString('ssh-ed25519') . $this->packString($signature);
 
             case 'rsa-sha2-256':
             case 'rsa-sha2-512':
@@ -259,31 +440,11 @@ final class Kex
                 }
 
                 // SSH signature format: string "rsa-sha2-256" || string <raw signature>
-                $signatureBlob = $this->packString($serverHostKeyAlgorithm) . $this->packString($signature);
-
-                break;
+                return $this->packString($serverHostKeyAlgorithm) . $this->packString($signature);
 
             default:
                 throw new \RuntimeException('Unhandled server host key algorithm: ' . $serverHostKeyAlgorithm);
         }
-
-        $this->logger->debug('Key exchange details:' . json_encode([
-            'host_key_blob_len' => strlen($hostKeyBlob),
-            'host_key_public' => $this->serverHostKey->getHostKeyAlgorithm(),
-            'signature_len' => strlen($signature),
-            'exchange_hash' => bin2hex($exchangeHash),
-        ]));
-
-        // Construct KEX_ECDH_REPLY
-        $kexReplyPayload
-            = MessageType::chr(MessageType::KEXDH_REPLY)
-            . $this->packString($hostKeyBlob)       // Host key blob (includes identifier)
-            . $this->packString($ephemeralPublic)   // Server's ephemeral public key
-            . $this->packString($signatureBlob);    // Signature blob (includes identifier)
-
-        $this->exchangeHash = $exchangeHash;
-
-        return $kexReplyPayload;
     }
 
     /**
